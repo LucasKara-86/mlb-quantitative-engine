@@ -1,0 +1,19 @@
+# Ambiente Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Segredos e dados locais (nunca versionar)
+.env
+*.db
+
+# Configuração pessoal do Claude Code (não compartilhada)
+.claude/
+
+# Saídas geradas pelo pipeline (relatórios) -- regeneradas a cada execução, não são código-fonte
+*.xlsx
+*.csv
+
+# Logs
+logs/
