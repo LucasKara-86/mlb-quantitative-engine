@@ -19,11 +19,12 @@ def _game_summary(
     home_pitcher_id: Optional[int] = 100,
     away_pitcher_id: Optional[int] = 200,
     venue: str = "Some Park",
+    game_datetime: str = "2026-07-17T23:05:00Z",
 ) -> GameSummary:
     return GameSummary(
         game_pk=game_pk,
         game_date="2026-07-17",
-        game_datetime="2026-07-17T23:05:00Z",
+        game_datetime=game_datetime,
         home_team="Home Team",
         away_team="Away Team",
         venue=venue,
@@ -735,6 +736,92 @@ def test_generate_daily_report_low_confidence_blocks_recommendation_despite_edge
 
     assert row.confidence_score < 70.0
     assert row.value_bet_recommendation is None
+
+
+def test_is_within_send_window_true_when_close_to_game_start(repository: Repository) -> None:
+    generator = ReportGenerator(api_client=_FakeApiClient([]), repository=repository, odds_service=_FakeOddsService())
+    now = datetime(2026, 7, 17, 20, 0, tzinfo=timezone.utc)
+    assert generator._is_within_send_window("2026-07-17T20:30:00Z", now=now) is True  # 30 min depois
+
+
+def test_is_within_send_window_false_when_game_is_far_away(repository: Repository) -> None:
+    """Regressão do bug real: uma retentativa de lineup não deve poder disparar um
+    alerta horas antes do jogo só porque a confiança finalmente ficou alta."""
+    generator = ReportGenerator(api_client=_FakeApiClient([]), repository=repository, odds_service=_FakeOddsService())
+    now = datetime(2026, 7, 17, 14, 0, tzinfo=timezone.utc)
+    assert generator._is_within_send_window("2026-07-17T20:30:00Z", now=now) is False  # 6h30 depois
+
+
+def test_is_within_send_window_true_when_game_datetime_unknown(repository: Repository) -> None:
+    generator = ReportGenerator(api_client=_FakeApiClient([]), repository=repository, odds_service=_FakeOddsService())
+    assert generator._is_within_send_window(None) is True
+
+
+def test_no_telegram_alert_when_game_is_far_in_the_future(repository: Repository) -> None:
+    far_away = (datetime.now(timezone.utc) + timedelta(hours=5)).isoformat().replace("+00:00", "Z")
+    notifier = _FakeTelegramNotifier()
+    generator = ReportGenerator(
+        api_client=_FakeApiClient([_game_summary(game_datetime=far_away)]),
+        repository=repository,
+        lineup_service=_FakeLineupService(_OFFICIAL_HOME_LINEUP, _OFFICIAL_AWAY_LINEUP),
+        offense_service=_QueueOffenseService([_batting_metrics(160.0), _batting_metrics(160.0)]),
+        pitching_service=_QueuePitchingService([_pitching_metrics(6.0), _pitching_metrics(6.0)]),
+        odds_service=_FakeOddsService([_game_odds_with_clear_edge()]),
+        telegram_notifier=notifier,
+    )
+
+    rows = generator.generate_daily_report("2026-07-17")
+
+    assert rows[0].value_bet_recommendation is not None  # ainda qualifica e aparece no relatório
+    assert notifier.sent_bets == []  # mas não é enviado -- jogo longe demais
+    qualifying = [b for b in repository.list_value_bets() if b.meets_criteria]
+    assert qualifying and all(not b.alert_sent for b in qualifying)
+
+
+def test_telegram_alert_sent_when_within_the_send_window(repository: Repository) -> None:
+    soon = (datetime.now(timezone.utc) + timedelta(minutes=20)).isoformat().replace("+00:00", "Z")
+    notifier = _FakeTelegramNotifier()
+    generator = ReportGenerator(
+        api_client=_FakeApiClient([_game_summary(game_datetime=soon)]),
+        repository=repository,
+        lineup_service=_FakeLineupService(_OFFICIAL_HOME_LINEUP, _OFFICIAL_AWAY_LINEUP),
+        offense_service=_QueueOffenseService([_batting_metrics(160.0), _batting_metrics(160.0)]),
+        pitching_service=_QueuePitchingService([_pitching_metrics(6.0), _pitching_metrics(6.0)]),
+        odds_service=_FakeOddsService([_game_odds_with_clear_edge()]),
+        telegram_notifier=notifier,
+    )
+
+    generator.generate_daily_report("2026-07-17")
+
+    assert len(notifier.sent_bets) >= 1
+
+
+def test_duplicate_alert_is_not_resent_when_game_is_reevaluated(repository: Repository) -> None:
+    """Regressão do bug real: reavaliar o mesmo jogo (retentativa, reprocessamento
+    atrasado etc.) não deve reenviar a mesma recomendação de novo."""
+    soon = (datetime.now(timezone.utc) + timedelta(minutes=20)).isoformat().replace("+00:00", "Z")
+    notifier = _FakeTelegramNotifier()
+    generator = ReportGenerator(
+        api_client=_FakeApiClient([_game_summary(game_datetime=soon)]),
+        repository=repository,
+        lineup_service=_FakeLineupService(_OFFICIAL_HOME_LINEUP, _OFFICIAL_AWAY_LINEUP),
+        offense_service=_QueueOffenseService(
+            [_batting_metrics(160.0), _batting_metrics(160.0), _batting_metrics(160.0), _batting_metrics(160.0)]
+        ),
+        pitching_service=_QueuePitchingService(
+            [_pitching_metrics(6.0), _pitching_metrics(6.0), _pitching_metrics(6.0), _pitching_metrics(6.0)]
+        ),
+        odds_service=_FakeOddsService([_game_odds_with_clear_edge()]),
+        telegram_notifier=notifier,
+    )
+
+    generator.generate_daily_report("2026-07-17")
+    first_sent_count = len(notifier.sent_bets)
+    assert first_sent_count >= 1
+
+    generator.generate_daily_report("2026-07-17")  # reavaliação subsequente do mesmo jogo
+
+    assert len(notifier.sent_bets) == first_sent_count  # não duplicou
 
 
 def test_generate_daily_report_evaluates_team_totals_when_event_id_available(repository: Repository) -> None:

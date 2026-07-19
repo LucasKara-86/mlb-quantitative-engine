@@ -213,6 +213,29 @@ def test_new_value_bet_has_no_outcome_by_default(repository: Repository) -> None
     assert repository.list_resolved_value_bets() == []  # alert_sent sozinho não é "resolvido"
 
 
+def test_has_alert_been_sent_is_false_by_default(repository: Repository) -> None:
+    _seed_value_bet(repository, game_pk=1, market="game_total_over")
+    assert repository.has_alert_been_sent(1, "game_total_over") is False
+
+
+def test_has_alert_been_sent_is_true_after_marking_alert_sent(repository: Repository) -> None:
+    bet_id = _seed_value_bet(repository, game_pk=1, market="game_total_over")
+    repository.mark_alert_sent(bet_id)
+    assert repository.has_alert_been_sent(1, "game_total_over") is True
+
+
+def test_has_alert_been_sent_is_market_specific(repository: Repository) -> None:
+    bet_id = _seed_value_bet(repository, game_pk=1, market="game_total_over")
+    repository.mark_alert_sent(bet_id)
+    assert repository.has_alert_been_sent(1, "game_total_under") is False
+
+
+def test_has_alert_been_sent_is_game_specific(repository: Repository) -> None:
+    bet_id = _seed_value_bet(repository, game_pk=1, market="game_total_over")
+    repository.mark_alert_sent(bet_id)
+    assert repository.has_alert_been_sent(2, "game_total_over") is False
+
+
 def test_mark_bet_outcome_sets_outcome_and_result_notified(repository: Repository) -> None:
     bet_id = _seed_value_bet(repository)
     repository.mark_alert_sent(bet_id)

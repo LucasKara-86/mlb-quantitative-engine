@@ -149,6 +149,10 @@ class ReportGenerator:
 
     DEFAULT_TOTAL_LINE = 8.5
 
+    # Nunca envia alerta ao Telegram com mais que isso de antecedência do início do
+    # jogo (30 min de lead_time do agendamento + folga pra granularidade do polling).
+    MAX_EARLY_SEND_LEAD = timedelta(minutes=40)
+
     def __init__(
         self,
         api_client: Optional[MLBApiClient] = None,
@@ -268,7 +272,7 @@ class ReportGenerator:
         )
         for bet in candidates:
             saved_bet = self._persist_value_bet(projection_row.id, bet)
-            self._maybe_send_telegram_alert(bet, saved_bet.id)
+            self._maybe_send_telegram_alert(bet, saved_bet.id, game.game_datetime)
         value_bet_fields = self._best_value_bet_fields(candidates)
 
         return GameReportRow(
@@ -433,8 +437,34 @@ class ReportGenerator:
             meets_criteria=value_bet.meets_criteria,
         )
 
-    def _maybe_send_telegram_alert(self, value_bet: ValueBet, value_bet_id: int) -> None:
-        """Envia um alerta ao Telegram se houver notifier injetado e a aposta qualificar.
+    def _is_within_send_window(self, game_datetime: Optional[str], now: Optional[datetime] = None) -> bool:
+        """Só permite enviar um alerta quando faltar no máximo `MAX_EARLY_SEND_LEAD`
+        para o início do jogo.
+
+        Bug real de produção que motivou esta guarda: uma retentativa de lineup
+        (ver `retry_game`) pode ficar reagendando a cada 30 min por muitas horas
+        enquanto a confiança está baixa (comportamento correto — o jogo pode estar
+        longe e a lineup só sai perto da hora). O problema é que, assim que a
+        confiança finalmente ficasse alta, o alerta era enviado NA HORA, mesmo que
+        o jogo ainda estivesse a horas de distância (aconteceu com um jogo cujo
+        horário mudou de "TBD" pra um horário real bem mais tarde, e a retentativa
+        simplesmente não sabia que devia esperar). Esta guarda garante que, não
+        importa por qual caminho a avaliação chegou até aqui (lote normal,
+        retentativa, reprocessamento atrasado), o envio real só acontece perto da
+        janela pretendida (30 min antes do jogo, ver batch_scheduling.py).
+        """
+        if not game_datetime:
+            return True  # sem horário conhecido: mantém o comportamento anterior (não bloqueia)
+        start_time = datetime.fromisoformat(game_datetime.replace("Z", "+00:00"))
+        current = now or datetime.now(timezone.utc)
+        return current >= start_time - self.MAX_EARLY_SEND_LEAD
+
+    def _maybe_send_telegram_alert(
+        self, value_bet: ValueBet, value_bet_id: int, game_datetime: Optional[str] = None
+    ) -> None:
+        """Envia um alerta ao Telegram se houver notifier injetado, a aposta qualificar,
+        estivermos dentro da janela de envio e essa recomendação ainda não tiver sido
+        anunciada antes para esse jogo (evita duplicar quando o jogo é reavaliado).
 
         Marca `alert_sent=True` no registro persistido somente após um envio
         bem-sucedido — é esse flag que o verificador de resultados (GREEN/RED/PUSH,
@@ -446,6 +476,15 @@ class ReportGenerator:
         problema no Telegram não deve derrubar o processamento do resto do lote.
         """
         if self.telegram_notifier is None or not value_bet.meets_criteria:
+            return
+        if not self._is_within_send_window(game_datetime):
+            log.info(
+                f"{value_bet.market} do jogo {value_bet.game_pk} qualifica mas o jogo ainda está "
+                f"longe ({game_datetime}) -- não enviando agora"
+            )
+            return
+        if self.repository.has_alert_been_sent(value_bet.game_pk, value_bet.market):
+            log.info(f"{value_bet.market} do jogo {value_bet.game_pk} já foi anunciado antes -- não duplicando")
             return
         try:
             self.telegram_notifier.send_value_bet_alert(value_bet)
@@ -604,7 +643,7 @@ class ReportGenerator:
         )
         for bet in candidates:
             saved_bet = self._persist_value_bet(projection_row.id, bet)
-            self._maybe_send_telegram_alert(bet, saved_bet.id)
+            self._maybe_send_telegram_alert(bet, saved_bet.id, game.game_datetime)
         value_bet_fields = self._best_value_bet_fields(candidates)
 
         if confidence_score >= MIN_CONFIDENCE:
