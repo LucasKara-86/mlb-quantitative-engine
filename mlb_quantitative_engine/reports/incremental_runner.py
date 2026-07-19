@@ -14,8 +14,9 @@ intervalo do cron (ex.: jogo às 13:15 -> gatilho às 12:45).
 
 Pensado para ser chamado por uma tarefa agendada do Windows a cada poucos
 minutos: cada chamada verifica o que está pendente (usando o registro de
-lotes já processados no banco) e processa só isso, depois regenera o xlsx a
-partir do estado atual do banco (que já inclui todos os lotes anteriores).
+lotes já processados no banco) e processa só isso. O banco de dados é a
+única saída persistida — não há mais exportação para xlsx/csv; quem quiser
+consultar o estado do relatório usa o banco diretamente (ver Repository).
 
 Quando nenhum `report_generator` é injetado explicitamente, este módulo
 constrói um `ReportGenerator` com um `TelegramNotifier` real — ou seja, por
@@ -34,7 +35,6 @@ from mlb_quantitative_engine.analytics.batch_scheduling import Batch, GameSchedu
 from mlb_quantitative_engine.api.mlb_api import MLBApiClient
 from mlb_quantitative_engine.database.repository import Repository
 from mlb_quantitative_engine.reports.report_generator import ReportGenerator
-from mlb_quantitative_engine.reports.xlsx_export import export_to_xlsx
 from mlb_quantitative_engine.services.telegram_notifier import TelegramNotifier
 from mlb_quantitative_engine.utils.logger import log
 
@@ -48,7 +48,6 @@ def run_due_batches(
     api_client: Optional[MLBApiClient] = None,
     repository: Optional[Repository] = None,
     report_generator: Optional[ReportGenerator] = None,
-    xlsx_output_path: Optional[str] = None,
     now: Optional[datetime] = None,
 ) -> List[Batch]:
     """Processa todos os lotes pendentes para a data informada (hoje, por padrão).
@@ -96,17 +95,12 @@ def run_due_batches(
             generator.build_row(game, all_odds)
         repo.mark_batch_processed(target_date, batch.anchor_time)
 
-    output_path = xlsx_output_path or f"relatorio_{target_date}_completo.xlsx"
-    saved_path = export_to_xlsx(repo, target_date, output_path)
-    log.info(f"Relatório atualizado: {saved_path}")
-
     return pending
 
 
 def retry_pending_lineups(
     repository: Optional[Repository] = None,
     report_generator: Optional[ReportGenerator] = None,
-    xlsx_output_path: Optional[str] = None,
     now: Optional[datetime] = None,
 ) -> int:
     """Reprocessa jogos cuja lineup ainda não estava oficial numa passada anterior
@@ -126,16 +120,9 @@ def retry_pending_lineups(
         log.info(f"Nenhuma retentativa de lineup pendente (verificado às {now.isoformat()})")
         return 0
 
-    dates_touched = set()
     for retry in due_retries:
         log.info(f"Reavaliando lineup do jogo {retry.game_pk} (retentativa agendada para {retry.retry_at.isoformat()})")
         generator.retry_game(retry.game_pk, now=now)
-        dates_touched.add(retry.game_date)
-
-    for game_date in dates_touched:
-        output_path = xlsx_output_path or f"relatorio_{game_date}_completo.xlsx"
-        saved_path = export_to_xlsx(repo, game_date, output_path)
-        log.info(f"Relatório atualizado após retentativas: {saved_path}")
 
     return len(due_retries)
 

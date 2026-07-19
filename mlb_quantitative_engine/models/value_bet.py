@@ -42,7 +42,7 @@ class ValueBet:
 def describe_market(market: str, home_team: str, away_team: str) -> str:
     """Traduz o identificador de mercado (ex.: "home_team_total_over") para um rótulo
     legível, substituindo "home_team_total"/"away_team_total" pelo nome real do time
-    e "game_total" por "Jogo". Reaproveitado pelo export em xlsx e pelos alertas do Telegram."""
+    e "game_total" por "Jogo". Reaproveitado pelos alertas do Telegram."""
     label = market.replace("home_team_total", home_team).replace("away_team_total", away_team)
     label = label.replace("game_total", "Jogo")
     return label.replace("_over", " Over").replace("_under", " Under")

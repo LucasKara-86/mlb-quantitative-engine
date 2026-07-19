@@ -11,9 +11,5 @@ __pycache__/
 # Configuração pessoal do Claude Code (não compartilhada)
 .claude/
 
-# Saídas geradas pelo pipeline (relatórios) -- regeneradas a cada execução, não são código-fonte
-*.xlsx
-*.csv
-
 # Logs
 logs/

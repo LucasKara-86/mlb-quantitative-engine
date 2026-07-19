@@ -6,8 +6,8 @@ Mensagem pensada para ser limpa e direta: qual jogo, qual lado (Over/Under —
 e o time, quando for Team Total), a odd mínima aceitável, a probabilidade
 projetada pelo modelo e o tamanho de entrada sugerido (Kelly fracionado,
 limitado a no máximo 2% da banca por aposta). Não inclui edge, EV bruto,
-casa de apostas ou outros detalhes técnicos — isso fica no relatório
-completo (xlsx/banco); o alerta é para consumo rápido em um canal. A odd
+casa de apostas ou outros detalhes técnicos — isso fica registrado só no
+banco (ver Repository); o alerta é para consumo rápido em um canal. A odd
 mínima (não a melhor encontrada) e a ausência da casa de apostas são
 propositais: a recomendação deve valer em qualquer casa que ofereça pelo
 menos essa odd, não travada a uma única banca específica.

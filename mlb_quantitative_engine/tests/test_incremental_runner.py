@@ -61,7 +61,7 @@ def repository(tmp_path: Path) -> Repository:
     return Repository(db_path=str(tmp_path / "test.db"))
 
 
-def test_no_batches_due_processes_nothing(repository: Repository, tmp_path: Path) -> None:
+def test_no_batches_due_processes_nothing(repository: Repository) -> None:
     games = [_game(1, 14, 10), _game(2, 17, 10)]
     generator = _FakeReportGenerator()
 
@@ -70,15 +70,14 @@ def test_no_batches_due_processes_nothing(repository: Repository, tmp_path: Path
         api_client=_FakeApiClient(games),
         repository=repository,
         report_generator=generator,
-        xlsx_output_path=str(tmp_path / "out.xlsx"),
-        now=_t(10, 0),  # bem antes de qualquer disparo (13:50 e 16:50)
+        now=_t(10, 0),  # bem antes de qualquer disparo (13:40 e 16:40)
     )
 
     assert result == []
     assert generator.built_game_pks == []
 
 
-def test_due_batch_processes_only_its_games(repository: Repository, tmp_path: Path) -> None:
+def test_due_batch_processes_only_its_games(repository: Repository) -> None:
     """Cada jogo tem seu próprio gatilho (30 min antes do seu horário) -- só o jogo 1
     (gatilho 13:40) está devido às 14:00; o jogo 2 (gatilho 14:50) e o jogo 3
     (gatilho 16:40) ainda não."""
@@ -90,7 +89,6 @@ def test_due_batch_processes_only_its_games(repository: Repository, tmp_path: Pa
         api_client=_FakeApiClient(games),
         repository=repository,
         report_generator=generator,
-        xlsx_output_path=str(tmp_path / "out.xlsx"),
         now=_t(14, 0),
     )
 
@@ -101,47 +99,33 @@ def test_due_batch_processes_only_its_games(repository: Repository, tmp_path: Pa
     assert repository.is_batch_processed("2026-07-18", _t(17, 10)) is False
 
 
-def test_already_processed_batch_is_not_reprocessed(repository: Repository, tmp_path: Path) -> None:
+def test_already_processed_batch_is_not_reprocessed(repository: Repository) -> None:
     games = [_game(1, 14, 10)]
     generator = _FakeReportGenerator()
-    xlsx_path = str(tmp_path / "out.xlsx")
 
     run_due_batches(
         date="2026-07-18", api_client=_FakeApiClient(games), repository=repository,
-        report_generator=generator, xlsx_output_path=xlsx_path, now=_t(14, 0),
+        report_generator=generator, now=_t(14, 0),
     )
     assert generator.built_game_pks == [1]
 
     # roda de novo, mais tarde -- lote já processado não deve reprocessar
     result = run_due_batches(
         date="2026-07-18", api_client=_FakeApiClient(games), repository=repository,
-        report_generator=generator, xlsx_output_path=xlsx_path, now=_t(18, 0),
+        report_generator=generator, now=_t(18, 0),
     )
     assert result == []
     assert generator.built_game_pks == [1]  # não duplicou
 
 
-def test_xlsx_is_exported_after_processing_a_batch(repository: Repository, tmp_path: Path) -> None:
-    games = [_game(1, 14, 10)]
-    generator = _FakeReportGenerator()
-    xlsx_path = str(tmp_path / "out.xlsx")
-
-    run_due_batches(
-        date="2026-07-18", api_client=_FakeApiClient(games), repository=repository,
-        report_generator=generator, xlsx_output_path=xlsx_path, now=_t(14, 0),
-    )
-
-    assert Path(xlsx_path).exists()
-
-
-def test_games_without_game_datetime_are_ignored_in_scheduling(repository: Repository, tmp_path: Path) -> None:
+def test_games_without_game_datetime_are_ignored_in_scheduling(repository: Repository) -> None:
     game_no_time = _game(1, 14, 10)
     game_no_time = GameSummary(**{**game_no_time.__dict__, "game_datetime": None})
     generator = _FakeReportGenerator()
 
     result = run_due_batches(
         date="2026-07-18", api_client=_FakeApiClient([game_no_time]), repository=repository,
-        report_generator=generator, xlsx_output_path=str(tmp_path / "out.xlsx"), now=_t(14, 0),
+        report_generator=generator, now=_t(14, 0),
     )
 
     assert result == []

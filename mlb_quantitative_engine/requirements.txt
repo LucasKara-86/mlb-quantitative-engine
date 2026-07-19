@@ -20,4 +20,3 @@ pytest
 pytest-cov
 httpx
 aiohttp
-openpyxl
