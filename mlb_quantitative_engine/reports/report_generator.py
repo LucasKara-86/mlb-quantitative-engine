@@ -85,7 +85,10 @@ from mlb_quantitative_engine.services.telegram_notifier import TelegramNotifier
 from mlb_quantitative_engine.services.weather_service import WeatherService
 from mlb_quantitative_engine.utils.logger import log
 
-RETRY_DELAY = timedelta(minutes=30)
+# Intervalo de reagendamento da retentativa de lineup. Mantido curto (10 min) para que,
+# no modelo de gatilhos por jogo (ver reports/daily_planner.py), uma retentativa agendada
+# na passada de -30 min caia no gatilho seguinte (-15 min), antes do jogo começar.
+RETRY_DELAY = timedelta(minutes=10)
 
 
 class ProjectionUnavailable(RuntimeError):
