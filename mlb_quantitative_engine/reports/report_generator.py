@@ -8,12 +8,14 @@ parâmetro sobre Binomial Negativa) -> comparação com odds reais -> Value Bet
 
 Escopo desta etapa: cobre os insumos já implementados (ataque real via
 lineup, pitching real do titular misturado com o bullpen, park factor real do
-estádio, encolhimento bayesiano de wRC+/FIP por tamanho de amostra, camada de
-Monte Carlo sobre Binomial Negativa, odds reais de Game Total E Team Total
-por time, avaliação de Value Bet com Edge/EV/Kelly nos três mercados). Clima
-e umpire ainda não existem — os campos correspondentes do relatório completo
-previsto na especificação ficam de fora por enquanto e serão adicionados por
-etapas futuras sem quebrar esta estrutura.
+estádio, temperatura real via WeatherService, encolhimento bayesiano de
+wRC+/FIP por tamanho de amostra, camada de Monte Carlo sobre Binomial
+Negativa, odds reais de Game Total E Team Total por time, avaliação de Value
+Bet com Edge/EV/Kelly nos três mercados). Vento (direção) e umpire ainda não
+existem — ver services/weather_service.py para o porquê do vento ficar de
+fora por enquanto; os campos correspondentes do relatório completo previsto
+na especificação ficam de fora e serão adicionados por etapas futuras sem
+quebrar esta estrutura.
 
 Team Total usa o endpoint por evento da The Odds API (1 crédito adicional por
 jogo, além do bulk de Game Total) — só é buscado quando `game_odds.event_id`
@@ -80,6 +82,7 @@ from mlb_quantitative_engine.services.offense_service import OffenseService
 from mlb_quantitative_engine.services.park_factor_service import ParkFactorService
 from mlb_quantitative_engine.services.pitching_service import PitchingService
 from mlb_quantitative_engine.services.telegram_notifier import TelegramNotifier
+from mlb_quantitative_engine.services.weather_service import WeatherService
 from mlb_quantitative_engine.utils.logger import log
 
 RETRY_DELAY = timedelta(minutes=30)
@@ -163,6 +166,7 @@ class ReportGenerator:
         park_factor_service: Optional[ParkFactorService] = None,
         bullpen_service: Optional[BullpenService] = None,
         odds_service: Optional[OddsService] = None,
+        weather_service: Optional[WeatherService] = None,
         projection_engine: Optional[ProjectionEngine] = None,
         telegram_notifier: Optional[TelegramNotifier] = None,
         season: Optional[int] = None,
@@ -175,6 +179,7 @@ class ReportGenerator:
         self.park_factor_service = park_factor_service or ParkFactorService()
         self.bullpen_service = bullpen_service or BullpenService(self.api_client)
         self.odds_service = odds_service or OddsService()
+        self.weather_service = weather_service or WeatherService()
         self.projection_engine = projection_engine or ProjectionEngine()
         self.telegram_notifier = telegram_notifier  # opt-in: None -> nenhum alerta é enviado
         self.season = season or datetime.now(timezone.utc).year
@@ -302,6 +307,7 @@ class ReportGenerator:
             raise ProjectionUnavailable("estatísticas de um dos arremessadores titulares indisponíveis")
 
         park_factor = self.park_factor_service.get_park_factors(game.venue).run_factor
+        weather_factor = self.weather_service.get_weather_conditions(game.venue, game.game_datetime).factor
 
         home_bullpen = self._bullpen_status(game.home_team_id, game.game_date)
         away_bullpen = self._bullpen_status(game.away_team_id, game.game_date)
@@ -322,6 +328,7 @@ class ReportGenerator:
                 away_pitcher.fip, away_bullpen, away_pitcher.innings_pitched
             ),
             park_factor=park_factor,
+            weather_factor=weather_factor,
         )
         return projection, confidence_score
 

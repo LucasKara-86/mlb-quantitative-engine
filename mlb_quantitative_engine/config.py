@@ -28,8 +28,9 @@ class Settings(BaseSettings):
     odds_api_key: str = Field(default="", description="Chave de acesso da The Odds API")
     odds_api_base_url: str = "https://api.the-odds-api.com/v4"
 
-    # Weather API (provedor a definir na etapa de clima)
-    weather_api_key: str = Field(default="", description="Chave de acesso do provedor meteorológico")
+    # Weather API (Open-Meteo -- gratuita, sem necessidade de chave)
+    weather_api_base_url: str = "https://api.open-meteo.com/v1/forecast"
+    weather_api_key: str = Field(default="", description="Não utilizado pelo Open-Meteo; mantido por compatibilidade")
 
     # Telegram (alertas de Value Bet)
     telegram_bot_token: str = Field(default="", description="Token do bot do Telegram")

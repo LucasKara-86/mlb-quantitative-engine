@@ -119,6 +119,16 @@ class _FakeBullpenService:
         return self.status_by_team_id.get(team_id)
 
 
+class _NeutralWeatherService:
+    """Fator climático sempre neutro -- evita que testes de outros insumos (park factor
+    etc.) dependam de uma chamada de rede real à API de previsão do tempo."""
+
+    def get_weather_conditions(self, venue, game_datetime):
+        from mlb_quantitative_engine.services.weather_service import WeatherConditions
+
+        return WeatherConditions(venue or "desconhecido", None, None, None, False, 1.0)
+
+
 class _FakeOddsService:
     """Devolve uma lista fixa de GameOdds (vazia por padrão -> sem dados de mercado)."""
 
@@ -226,12 +236,43 @@ def test_generate_daily_report_applies_real_park_factor(tmp_path: Path) -> None:
             offense_service=_QueueOffenseService([_batting_metrics(100.0), _batting_metrics(100.0)]),
             pitching_service=_QueuePitchingService([_pitching_metrics(4.0), _pitching_metrics(4.0)]),
             odds_service=_FakeOddsService(),
+            weather_service=_NeutralWeatherService(),  # isola o teste do park factor da rede
         )
 
     coors_rows = _make_generator("Coors Field").generate_daily_report("2026-07-17")
     oracle_rows = _make_generator("Oracle Park").generate_daily_report("2026-07-17")
 
     assert coors_rows[0].projected_total_runs > oracle_rows[0].projected_total_runs
+
+
+def test_generate_daily_report_applies_weather_factor(tmp_path: Path) -> None:
+    """Um fator climático quente (>1.0) deve elevar a projeção total vs. um fator frio (<1.0),
+    para o mesmo ataque/pitching/estádio, confirmando que o clima entra na projeção."""
+
+    class _FixedWeatherService:
+        def __init__(self, factor: float) -> None:
+            self.factor = factor
+
+        def get_weather_conditions(self, venue, game_datetime):
+            from mlb_quantitative_engine.services.weather_service import WeatherConditions
+
+            return WeatherConditions(venue or "x", 85.0, 5.0, 180.0, False, self.factor)
+
+    def _make_generator(factor: float) -> ReportGenerator:
+        return ReportGenerator(
+            api_client=_FakeApiClient([_game_summary()]),
+            repository=Repository(db_path=str(tmp_path / f"weather-{factor}.db")),
+            lineup_service=_FakeLineupService(_OFFICIAL_HOME_LINEUP, _OFFICIAL_AWAY_LINEUP),
+            offense_service=_QueueOffenseService([_batting_metrics(100.0), _batting_metrics(100.0)]),
+            pitching_service=_QueuePitchingService([_pitching_metrics(4.0), _pitching_metrics(4.0)]),
+            odds_service=_FakeOddsService(),
+            weather_service=_FixedWeatherService(factor),
+        )
+
+    hot_rows = _make_generator(1.08).generate_daily_report("2026-07-17")
+    cold_rows = _make_generator(0.92).generate_daily_report("2026-07-17")
+
+    assert hot_rows[0].projected_total_runs > cold_rows[0].projected_total_runs
 
 
 def test_generate_daily_report_applies_bullpen_fatigue(tmp_path: Path) -> None:
