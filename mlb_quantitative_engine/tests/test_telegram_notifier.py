@@ -6,6 +6,7 @@ from mlb_quantitative_engine.models.value_bet import ValueBet
 from mlb_quantitative_engine.services.telegram_notifier import (
     TelegramNotifier,
     format_bet_result_message,
+    format_game_datetime_brasilia,
     format_value_bet_message,
 )
 
@@ -59,6 +60,33 @@ def test_format_value_bet_message_never_mentions_a_bookmaker() -> None:
     assert "FanDuel" not in message
 
 
+def test_format_game_datetime_brasilia_converts_utc_to_utc_minus_3() -> None:
+    # 23:05 UTC -> 20:05 em Brasília (UTC-3)
+    assert format_game_datetime_brasilia("2026-07-20T23:05:00Z") == "20/07/2026 20:05"
+
+
+def test_format_game_datetime_brasilia_handles_day_rollover_backwards() -> None:
+    # 02:10 UTC do dia 21 -> 23:10 do dia 20 em Brasília
+    assert format_game_datetime_brasilia("2026-07-21T02:10:00Z") == "20/07/2026 23:10"
+
+
+def test_format_game_datetime_brasilia_returns_none_for_missing_or_invalid() -> None:
+    assert format_game_datetime_brasilia(None) is None
+    assert format_game_datetime_brasilia("") is None
+    assert format_game_datetime_brasilia("nao-e-data") is None
+
+
+def test_format_value_bet_message_includes_game_time_in_brasilia_when_provided() -> None:
+    message = format_value_bet_message(_bet(), game_datetime="2026-07-20T23:05:00Z")
+    assert "20/07/2026 20:05" in message
+    assert "Brasília" in message
+
+
+def test_format_value_bet_message_omits_time_line_when_datetime_absent() -> None:
+    message = format_value_bet_message(_bet())
+    assert "Brasília" not in message
+
+
 def test_format_value_bet_message_game_total() -> None:
     bet = _bet(
         market="game_total_under", point=8.5, projected_probability=0.55,
@@ -84,6 +112,16 @@ def test_notifier_sends_formatted_message_to_configured_channel() -> None:
     assert chat_id == "@voobarato"
     assert "Chicago White Sox Over 4.5" in text
     assert parse_mode == "HTML"
+
+
+def test_notifier_includes_game_time_when_datetime_passed() -> None:
+    client = _FakeTelegramApiClient()
+    notifier = TelegramNotifier(api_client=client, channel_id="@voobarato")
+
+    notifier.send_value_bet_alert(_bet(), game_datetime="2026-07-20T23:05:00Z")
+
+    _, text, _ = client.sent[0]
+    assert "20/07/2026 20:05 (Brasília)" in text
 
 
 def test_notifier_raises_when_no_channel_configured() -> None:

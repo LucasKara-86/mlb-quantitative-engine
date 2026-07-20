@@ -542,12 +542,14 @@ def test_generate_daily_report_flags_clear_value_bet(repository: Repository) -> 
 class _FakeTelegramNotifier:
     def __init__(self, raise_error: bool = False) -> None:
         self.sent_bets = []
+        self.sent_datetimes = []
         self.raise_error = raise_error
 
-    def send_value_bet_alert(self, bet):
+    def send_value_bet_alert(self, bet, game_datetime=None):
         if self.raise_error:
             raise RuntimeError("Telegram indisponível (simulado)")
         self.sent_bets.append(bet)
+        self.sent_datetimes.append(game_datetime)
         return {"ok": True}
 
 
@@ -844,6 +846,8 @@ def test_telegram_alert_sent_when_within_the_send_window(repository: Repository)
     generator.generate_daily_report("2026-07-17")
 
     assert len(notifier.sent_bets) >= 1
+    # o horário do jogo é repassado ao notifier para compor a data/hora na mensagem
+    assert notifier.sent_datetimes[0] == soon
 
 
 def test_duplicate_alert_is_not_resent_when_game_is_reevaluated(repository: Repository) -> None:

@@ -13,26 +13,52 @@ propositais: a recomendação deve valer em qualquer casa que ofereça pelo
 menos essa odd, não travada a uma única banca específica.
 """
 
+from datetime import datetime
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from mlb_quantitative_engine.api.telegram_api import TelegramApiClient
 from mlb_quantitative_engine.config import settings
 from mlb_quantitative_engine.models.value_bet import ValueBet, describe_market
 from mlb_quantitative_engine.utils.logger import log
 
+_BRASILIA_TZ = ZoneInfo("America/Sao_Paulo")
 
-def format_value_bet_message(bet: ValueBet) -> str:
-    """Formata uma avaliação de Value Bet numa mensagem limpa para o Telegram (HTML)."""
+
+def format_game_datetime_brasilia(game_datetime: Optional[str]) -> Optional[str]:
+    """Converte o horário do jogo (ISO em UTC, ex.: '2026-07-20T23:05:00Z') para o
+    horário de Brasília, formatado como 'dd/mm/AAAA HH:MM'. Retorna None quando o
+    horário não é conhecido ou não pode ser interpretado (a mensagem simplesmente
+    omite a linha nesse caso)."""
+    if not game_datetime:
+        return None
+    try:
+        utc_dt = datetime.fromisoformat(game_datetime.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return utc_dt.astimezone(_BRASILIA_TZ).strftime("%d/%m/%Y %H:%M")
+
+
+def format_value_bet_message(bet: ValueBet, game_datetime: Optional[str] = None) -> str:
+    """Formata uma avaliação de Value Bet numa mensagem limpa para o Telegram (HTML).
+
+    Quando o horário do jogo é conhecido, inclui a data/hora em horário de Brasília."""
     matchup = f"{bet.away_team} @ {bet.home_team}"
     side = describe_market(bet.market, bet.home_team, bet.away_team)
 
-    return (
-        f"⚾ <b>{matchup}</b>\n\n"
-        f"🎯 {side} {bet.point}\n"
-        f"🎲 Odd mínima: {bet.minimum_acceptable_price:.2f}\n"
-        f"📊 Probabilidade: {bet.projected_probability * 100:.1f}%\n"
-        f"💰 Entrada sugerida: {bet.suggested_stake_fraction * 100:.1f}% da banca"
+    lines = [f"⚾ <b>{matchup}</b>", ""]
+    local_time = format_game_datetime_brasilia(game_datetime)
+    if local_time:
+        lines.append(f"🗓️ {local_time} (Brasília)")
+    lines.extend(
+        [
+            f"🎯 {side} {bet.point}",
+            f"🎲 Odd mínima: {bet.minimum_acceptable_price:.2f}",
+            f"📊 Probabilidade: {bet.projected_probability * 100:.1f}%",
+            f"💰 Entrada sugerida: {bet.suggested_stake_fraction * 100:.1f}% da banca",
+        ]
     )
+    return "\n".join(lines)
 
 
 _RESULT_ICON = {"GREEN": "✅", "RED": "❌", "PUSH": "⚪"}
@@ -70,12 +96,15 @@ class TelegramNotifier:
         # (ex.: testes que verificam o guard de "nenhum canal configurado").
         self.channel_id = settings.telegram_channel_id if channel_id is None else channel_id
 
-    def send_value_bet_alert(self, bet: ValueBet) -> dict:
-        """Formata e envia um alerta de Value Bet. Retorna a resposta bruta da API."""
+    def send_value_bet_alert(self, bet: ValueBet, game_datetime: Optional[str] = None) -> dict:
+        """Formata e envia um alerta de Value Bet. Retorna a resposta bruta da API.
+
+        `game_datetime` (ISO em UTC) é opcional; quando informado, a mensagem inclui a
+        data/hora do jogo em horário de Brasília."""
         if not self.channel_id:
             raise ValueError("Nenhum canal configurado (TELEGRAM_CHANNEL_ID ausente)")
 
-        message = format_value_bet_message(bet)
+        message = format_value_bet_message(bet, game_datetime)
         log.info(f"Enviando alerta de Value Bet ao Telegram: {bet.away_team} @ {bet.home_team} ({bet.market})")
         return self.api_client.send_message(self.channel_id, message)
 

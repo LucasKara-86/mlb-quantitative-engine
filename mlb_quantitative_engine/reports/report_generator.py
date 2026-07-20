@@ -521,7 +521,7 @@ class ReportGenerator:
             log.info(f"Jogo {value_bet.game_pk} já teve uma recomendação enviada -- não duplicando")
             return
         try:
-            self.telegram_notifier.send_value_bet_alert(value_bet)
+            self.telegram_notifier.send_value_bet_alert(value_bet, game_datetime)
         except Exception as exc:  # noqa: BLE001 - notificação é best-effort, nunca deve propagar
             log.error(f"Falha ao enviar alerta ao Telegram para {value_bet.market}: {exc}")
             return
