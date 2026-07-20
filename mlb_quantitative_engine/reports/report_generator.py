@@ -275,9 +275,7 @@ class ReportGenerator:
             home_team_quote=home_team_quote,
             away_team_quote=away_team_quote,
         )
-        for bet in candidates:
-            saved_bet = self._persist_value_bet(projection_row.id, bet)
-            self._maybe_send_telegram_alert(bet, saved_bet.id, game.game_datetime)
+        self._persist_and_alert(projection_row.id, candidates, game.game_pk, game.game_datetime)
         value_bet_fields = self._best_value_bet_fields(candidates)
 
         return GameReportRow(
@@ -466,12 +464,41 @@ class ReportGenerator:
         current = now or datetime.now(timezone.utc)
         return current >= start_time - self.MAX_EARLY_SEND_LEAD
 
+    @staticmethod
+    def _select_bet_to_alert(candidates: List[ValueBet]) -> Optional[ValueBet]:
+        """Escolhe UMA aposta por jogo para enviar ao Telegram: entre as que qualificam
+        (`meets_criteria`), a de MAIOR probabilidade projetada.
+
+        Decisão baseada nos resultados reais acumulados do projeto: enviar todas as
+        apostas que qualificam por jogo teve taxa de acerto de 43,6% e ROI negativo,
+        porque múltiplas apostas do mesmo jogo são correlacionadas (uma projeção ruim
+        derruba todas de uma vez). Restringir a uma aposta por jogo, escolhida pela
+        maior probabilidade absoluta (não pelo maior EV, que privilegia azarões de odd
+        alta), foi a única estratégia lucrativa no histórico (55,6% de acerto, ROI
+        positivo). Todas as avaliações continuam PERSISTIDAS no banco para calibração —
+        só o ENVIO é restringido."""
+        qualifying = [bet for bet in candidates if bet.meets_criteria]
+        if not qualifying:
+            return None
+        return max(qualifying, key=lambda bet: bet.projected_probability)
+
+    def _persist_and_alert(
+        self, projection_id: int, candidates: List[ValueBet], game_pk: int, game_datetime: Optional[str]
+    ) -> None:
+        """Persiste TODAS as avaliações (histórico completo p/ calibração) e envia ao
+        Telegram no máximo UMA — a melhor por jogo (ver `_select_bet_to_alert`)."""
+        saved_by_bet = {id(bet): self._persist_value_bet(projection_id, bet) for bet in candidates}
+        best = self._select_bet_to_alert(candidates)
+        if best is not None:
+            self._maybe_send_telegram_alert(best, saved_by_bet[id(best)].id, game_datetime)
+
     def _maybe_send_telegram_alert(
         self, value_bet: ValueBet, value_bet_id: int, game_datetime: Optional[str] = None
     ) -> None:
         """Envia um alerta ao Telegram se houver notifier injetado, a aposta qualificar,
-        estivermos dentro da janela de envio e essa recomendação ainda não tiver sido
-        anunciada antes para esse jogo (evita duplicar quando o jogo é reavaliado).
+        estivermos dentro da janela de envio e NENHUM alerta ainda tiver sido enviado
+        para esse jogo (no máximo uma recomendação por jogo, mesmo através de
+        reavaliações — retentativa de lineup, reprocessamento etc.).
 
         Marca `alert_sent=True` no registro persistido somente após um envio
         bem-sucedido — é esse flag que o verificador de resultados (GREEN/RED/PUSH,
@@ -490,8 +517,8 @@ class ReportGenerator:
                 f"longe ({game_datetime}) -- não enviando agora"
             )
             return
-        if self.repository.has_alert_been_sent(value_bet.game_pk, value_bet.market):
-            log.info(f"{value_bet.market} do jogo {value_bet.game_pk} já foi anunciado antes -- não duplicando")
+        if self.repository.has_any_alert_been_sent_for_game(value_bet.game_pk):
+            log.info(f"Jogo {value_bet.game_pk} já teve uma recomendação enviada -- não duplicando")
             return
         try:
             self.telegram_notifier.send_value_bet_alert(value_bet)
@@ -648,9 +675,7 @@ class ReportGenerator:
             home_team_quote=home_team_quote,
             away_team_quote=away_team_quote,
         )
-        for bet in candidates:
-            saved_bet = self._persist_value_bet(projection_row.id, bet)
-            self._maybe_send_telegram_alert(bet, saved_bet.id, game.game_datetime)
+        self._persist_and_alert(projection_row.id, candidates, game.game_pk, game.game_datetime)
         value_bet_fields = self._best_value_bet_fields(candidates)
 
         if confidence_score >= MIN_CONFIDENCE:

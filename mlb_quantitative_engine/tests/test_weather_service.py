@@ -11,6 +11,8 @@ from mlb_quantitative_engine.services.weather_service import (
     TEMPERATURE_BASELINE_F,
     WeatherService,
     calculate_temperature_factor,
+    calculate_wind_factor,
+    outbound_wind_component,
 )
 
 
@@ -129,14 +131,54 @@ def test_picks_the_forecast_hour_closest_to_game_start() -> None:
     assert conditions.temperature_f == pytest.approx(95.0)
 
 
-def test_wind_is_recorded_but_does_not_affect_the_factor() -> None:
-    """Vento é registrado pra auditoria/uso futuro, mas não ajusta o fator ainda
-    (falta dado de orientação de home plate por estádio -- ver docstring do módulo)."""
-    calm = WeatherService(api_client=_FakeWeatherApiClient(_forecast(temp=80.0, wind_speed=2.0)))
-    windy = WeatherService(api_client=_FakeWeatherApiClient(_forecast(temp=80.0, wind_speed=35.0)))
+# --- vento: funções puras ---
 
-    calm_conditions = calm.get_weather_conditions("Yankee Stadium", "2026-07-20T18:00:00Z")
-    windy_conditions = windy.get_weather_conditions("Yankee Stadium", "2026-07-20T18:00:00Z")
 
-    assert calm_conditions.factor == windy_conditions.factor
-    assert windy_conditions.wind_speed_mph == pytest.approx(35.0)
+def test_outbound_wind_component_is_positive_when_blowing_out_to_center() -> None:
+    """Vento vindo de trás do home (origem = bearing_cf + 180) sopra campo afora -> positivo."""
+    # cf_bearing 25 -> vento OUT vem de 205
+    assert outbound_wind_component(20.0, wind_from_deg=205.0, cf_bearing_deg=25.0) == pytest.approx(20.0, abs=0.1)
+
+
+def test_outbound_wind_component_is_negative_when_blowing_in_from_center() -> None:
+    """Vento vindo do centro do campo (origem = bearing_cf) sopra campo adentro -> negativo."""
+    assert outbound_wind_component(20.0, wind_from_deg=25.0, cf_bearing_deg=25.0) == pytest.approx(-20.0, abs=0.1)
+
+
+def test_outbound_wind_component_is_near_zero_for_crosswind() -> None:
+    """Vento perpendicular ao eixo home->centro quase não tem componente afora/adentro."""
+    assert outbound_wind_component(20.0, wind_from_deg=115.0, cf_bearing_deg=25.0) == pytest.approx(0.0, abs=0.5)
+
+
+def test_wind_factor_boosts_offense_for_out_blowing_wind() -> None:
+    assert calculate_wind_factor(20.0, wind_from_deg=205.0, cf_bearing_deg=25.0) > 1.0
+
+
+def test_wind_factor_suppresses_offense_for_in_blowing_wind() -> None:
+    assert calculate_wind_factor(20.0, wind_from_deg=25.0, cf_bearing_deg=25.0) < 1.0
+
+
+# --- vento: integrado no serviço ---
+
+
+def test_out_blowing_wind_raises_the_factor_vs_in_blowing_wind() -> None:
+    """Mesma temperatura neutra (70°F): vento campo afora deve dar fator maior que campo adentro."""
+    out_wind = WeatherService(api_client=_FakeWeatherApiClient(_forecast(temp=70.0, wind_speed=20.0, wind_dir=205.0)))
+    in_wind = WeatherService(api_client=_FakeWeatherApiClient(_forecast(temp=70.0, wind_speed=20.0, wind_dir=25.0)))
+
+    out_conditions = out_wind.get_weather_conditions("Yankee Stadium", "2026-07-20T18:00:00Z")
+    in_conditions = in_wind.get_weather_conditions("Yankee Stadium", "2026-07-20T18:00:00Z")
+
+    assert out_conditions.factor > 1.0
+    assert in_conditions.factor < 1.0
+    assert out_conditions.factor > in_conditions.factor
+    assert out_conditions.wind_speed_mph == pytest.approx(20.0)
+
+
+def test_combined_factor_is_clamped_to_bounds() -> None:
+    """Calor extremo + vento forte a favor não deve estourar o teto combinado."""
+    extreme = WeatherService(
+        api_client=_FakeWeatherApiClient(_forecast(temp=110.0, wind_speed=40.0, wind_dir=205.0))
+    )
+    conditions = extreme.get_weather_conditions("Yankee Stadium", "2026-07-20T18:00:00Z")
+    assert conditions.factor <= MAX_WEATHER_FACTOR

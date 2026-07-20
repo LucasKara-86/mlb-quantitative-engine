@@ -240,6 +240,20 @@ class Repository:
                 is not None
             )
 
+    def has_any_alert_been_sent_for_game(self, game_pk: int) -> bool:
+        """Diz se QUALQUER alerta já foi enviado para esse jogo (qualquer mercado), em
+        qualquer projeção — usado para garantir no máximo uma recomendação por jogo,
+        mesmo através de reavaliações (retentativa de lineup, reprocessamento etc.)."""
+        with self.session() as session:
+            return (
+                session.query(ValueBet)
+                .join(Projection, ValueBet.projection_id == Projection.id)
+                .join(Game, Projection.game_id == Game.id)
+                .filter(Game.game_pk == game_pk, ValueBet.alert_sent.is_(True))
+                .first()
+                is not None
+            )
+
     def list_bets_pending_result_check(self) -> Sequence[Tuple[ValueBet, Game]]:
         """Retorna (ValueBet, Game) de cada aposta cujo alerta já foi enviado ao Telegram
         mas cujo resultado (GREEN/RED/PUSH) ainda não foi notificado. Uma vez notificado

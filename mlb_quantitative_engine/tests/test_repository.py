@@ -236,6 +236,24 @@ def test_has_alert_been_sent_is_game_specific(repository: Repository) -> None:
     assert repository.has_alert_been_sent(2, "game_total_over") is False
 
 
+def test_has_any_alert_been_sent_for_game_is_false_by_default(repository: Repository) -> None:
+    _seed_value_bet(repository, game_pk=1, market="game_total_over")
+    assert repository.has_any_alert_been_sent_for_game(1) is False
+
+
+def test_has_any_alert_been_sent_for_game_is_true_regardless_of_market(repository: Repository) -> None:
+    bet_id = _seed_value_bet(repository, game_pk=1, market="game_total_over")
+    repository.mark_alert_sent(bet_id)
+    # qualquer mercado do jogo já enviado -> True (dedup por jogo, não por mercado)
+    assert repository.has_any_alert_been_sent_for_game(1) is True
+
+
+def test_has_any_alert_been_sent_for_game_is_game_specific(repository: Repository) -> None:
+    bet_id = _seed_value_bet(repository, game_pk=1, market="game_total_over")
+    repository.mark_alert_sent(bet_id)
+    assert repository.has_any_alert_been_sent_for_game(2) is False
+
+
 def test_mark_bet_outcome_sets_outcome_and_result_notified(repository: Repository) -> None:
     bet_id = _seed_value_bet(repository)
     repository.mark_alert_sent(bet_id)

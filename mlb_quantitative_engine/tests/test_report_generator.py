@@ -620,10 +620,11 @@ def test_no_telegram_alert_when_no_bet_qualifies(repository: Repository) -> None
     assert notifier.sent_bets == []
 
 
-def test_alert_sent_flag_is_set_after_successful_telegram_send(repository: Repository) -> None:
-    """Só as apostas que realmente qualificam (e portanto disparam um envio real) devem
-    ficar marcadas com alert_sent=True -- é esse flag que o verificador de resultado
-    (bet_result_checker) usa para saber o que precisa de um GREEN/RED/PUSH depois."""
+def test_only_one_alert_sent_per_game_and_it_is_the_highest_probability(repository: Repository) -> None:
+    """No máximo UMA aposta por jogo é enviada (a de maior probabilidade projetada entre
+    as que qualificam) -- as demais avaliações ficam persistidas no banco mas com
+    alert_sent=False. É o flag alert_sent que o verificador de resultado
+    (bet_result_checker) usa depois para saber o que precisa de GREEN/RED/PUSH."""
     notifier = _FakeTelegramNotifier()
     generator = ReportGenerator(
         api_client=_FakeApiClient([_game_summary()]),
@@ -637,11 +638,19 @@ def test_alert_sent_flag_is_set_after_successful_telegram_send(repository: Repos
 
     generator.generate_daily_report("2026-07-17")
 
+    assert len(notifier.sent_bets) == 1  # exatamente uma, mesmo com várias qualificando
+    sent = notifier.sent_bets[0]
+
     all_bets = repository.list_value_bets()
+    flagged = [bet for bet in all_bets if bet.alert_sent]
+    assert len(flagged) == 1
+    assert flagged[0].meets_criteria
+
+    # a enviada é a de maior probabilidade entre as que qualificam
     qualifying = [bet for bet in all_bets if bet.meets_criteria]
-    non_qualifying = [bet for bet in all_bets if not bet.meets_criteria]
-    assert qualifying and all(bet.alert_sent for bet in qualifying)
-    assert non_qualifying and all(not bet.alert_sent for bet in non_qualifying)
+    best_prob = max(bet.projection_probability for bet in qualifying)
+    assert flagged[0].projection_probability == pytest.approx(best_prob)
+    assert sent.market == flagged[0].market
 
 
 def test_alert_sent_stays_false_when_telegram_send_fails(repository: Repository) -> None:
