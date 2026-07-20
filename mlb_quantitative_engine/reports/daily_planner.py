@@ -25,16 +25,22 @@ Robustez:
 - Se este planner falhar (rede/SSL), as tarefas mantêm os gatilhos do último
   planejamento bem-sucedido — nada para silenciosamente.
 
-Específico do Windows: a reescrita dos gatilhos usa o módulo ScheduledTasks via
-PowerShell. A parte de cálculo (analytics/schedule_planning.py) é pura e testável; a
-parte de I/O (aplicar no SO) é injetável (`apply_fn`) para permitir teste sem tocar no
-agendador real.
+A reescrita dos gatilhos no SO depende da plataforma: no Windows usa o módulo
+ScheduledTasks via PowerShell; no Linux usa o crontab do usuário (`apply_linux_schedule`),
+com a mesma semântica — um gatilho único por horário exato, já que o cron aceita dia+mês
+específicos num campo (equivalente a `-Once -At`). A janela do verificador de resultados
+(que no Windows usa RepetitionInterval/RepetitionDuration) vira uma linha de cron por
+instante de 15 em 15 min dentro da janela — mesmo efeito prático. A parte de cálculo
+(analytics/schedule_planning.py) é pura e testável; a parte de I/O (aplicar no SO) é
+injetável (`apply_fn`) para permitir teste sem tocar no agendador real.
 
 Uso: `python -m mlb_quantitative_engine.reports.daily_planner`
 """
 
 import subprocess
-from datetime import datetime, timezone
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Callable, List, Optional, Sequence, Tuple
 
 from mlb_quantitative_engine.analytics.schedule_planning import (
@@ -47,6 +53,16 @@ from mlb_quantitative_engine.utils.logger import log
 INCREMENTAL_TASK_NAME = "MLB_Incremental_Report"
 RESULT_TASK_NAME = "MLB_Result_Checker"
 RESULT_CHECK_INTERVAL_MINUTES = 15
+
+# raiz do projeto (mlb_quantitative_engine/reports/daily_planner.py -> sobe 2 níveis)
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_VENV_PYTHON = _PROJECT_ROOT / ".venv" / "bin" / "python"
+_LOG_DIR = _PROJECT_ROOT / "mlb_quantitative_engine" / "logs"
+
+_CRON_BEGIN_INCREMENTAL = "# MLB_QUANTITATIVE_ENGINE BEGIN incremental_report"
+_CRON_END_INCREMENTAL = "# MLB_QUANTITATIVE_ENGINE END incremental_report"
+_CRON_BEGIN_RESULT = "# MLB_QUANTITATIVE_ENGINE BEGIN result_checker"
+_CRON_END_RESULT = "# MLB_QUANTITATIVE_ENGINE END result_checker"
 
 ApplyFn = Callable[[List[datetime], Optional[Tuple[datetime, datetime]]], None]
 
@@ -118,6 +134,100 @@ def _apply_result_window(window: Optional[Tuple[datetime, datetime]]) -> None:
     )
 
 
+def _python_executable() -> str:
+    return str(_VENV_PYTHON) if _VENV_PYTHON.exists() else sys.executable
+
+
+def _cron_command(module: str, log_name: str) -> str:
+    log_path = _LOG_DIR / log_name
+    return f"cd {_PROJECT_ROOT} && {_python_executable()} -m {module} >> {log_path} 2>&1"
+
+
+def _cron_line(trigger: datetime, command: str) -> str:
+    """Uma linha de cron que dispara só nesse instante: dia+mês específicos (em vez de
+    `*`) fazem o campo funcionar como gatilho único, o equivalente cron de `-Once -At`
+    do Windows Task Scheduler. `daily_planner` reescreve o bloco a cada manhã, então
+    linhas de dias passados são naturalmente substituídas antes de poderem repetir no
+    ano seguinte."""
+    local = trigger.astimezone()
+    return f"{local.minute} {local.hour} {local.day} {local.month} * {command}"
+
+
+def _read_crontab() -> str:
+    result = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
+    if result.returncode != 0:
+        return ""  # ainda não existe crontab para o usuário
+    return result.stdout
+
+
+def _write_crontab(content: str) -> None:
+    result = subprocess.run(["crontab", "-"], input=content, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"Falha ao atualizar crontab: {result.stderr.strip() or result.stdout.strip()}")
+
+
+def _replace_block(crontab_text: str, begin_marker: str, end_marker: str, new_lines: List[str]) -> str:
+    """Substitui o conteúdo entre `begin_marker`/`end_marker` por `new_lines`, preservando
+    o resto do crontab do usuário intocado (mesmo papel do nome único de task no Windows)."""
+    lines = crontab_text.splitlines()
+    out: List[str] = []
+    i = 0
+    while i < len(lines):
+        if lines[i].strip() == begin_marker:
+            i += 1
+            while i < len(lines) and lines[i].strip() != end_marker:
+                i += 1
+            i += 1  # pula a linha do end_marker
+            continue
+        out.append(lines[i])
+        i += 1
+    while out and not out[-1].strip():
+        out.pop()
+    if new_lines:
+        out.append(begin_marker)
+        out.extend(new_lines)
+        out.append(end_marker)
+    return "\n".join(out) + "\n" if out else ""
+
+
+def apply_linux_schedule(
+    triggers: List[datetime], window: Optional[Tuple[datetime, datetime]]
+) -> None:
+    """Reescreve os gatilhos equivalentes no crontab do usuário (implementação real para
+    Linux — mesmo papel de `apply_windows_schedule`, ver docstring do módulo)."""
+    current = _read_crontab()
+
+    incremental_lines = [
+        _cron_line(
+            trigger,
+            _cron_command("mlb_quantitative_engine.reports.incremental_runner", "cron_incremental.log"),
+        )
+        for trigger in triggers
+    ]
+    current = _replace_block(current, _CRON_BEGIN_INCREMENTAL, _CRON_END_INCREMENTAL, incremental_lines)
+
+    result_lines: List[str] = []
+    if window is not None:
+        start, end = window
+        command = _cron_command("mlb_quantitative_engine.reports.result_checker_runner", "cron_result_checker.log")
+        step = timedelta(minutes=RESULT_CHECK_INTERVAL_MINUTES)
+        t = start
+        while t <= end:
+            result_lines.append(_cron_line(t, command))
+            t += step
+    current = _replace_block(current, _CRON_BEGIN_RESULT, _CRON_END_RESULT, result_lines)
+
+    _write_crontab(current)
+    log.info(
+        f"crontab atualizado: {len(incremental_lines)} gatilho(s) de relatório, "
+        f"{len(result_lines)} verificação(ões) de resultado"
+    )
+
+
+def _default_apply_fn() -> ApplyFn:
+    return apply_windows_schedule if sys.platform.startswith("win") else apply_linux_schedule
+
+
 def plan_today(
     date: Optional[str] = None,
     api_client: Optional[MLBApiClient] = None,
@@ -126,11 +236,12 @@ def plan_today(
 ) -> Tuple[List[datetime], Optional[Tuple[datetime, datetime]]]:
     """Calcula e aplica o agendamento do dia. Retorna (gatilhos, janela) para inspeção.
 
-    `apply_fn` é injetável para testes (padrão: reescreve as tarefas reais do Windows)."""
+    `apply_fn` é injetável para testes (padrão: reescreve as tarefas reais do SO —
+    Windows Task Scheduler ou crontab, conforme a plataforma)."""
     now = now or datetime.now(timezone.utc)
     target_date = date or now.strftime("%Y-%m-%d")
     client = api_client or MLBApiClient()
-    apply = apply_fn or apply_windows_schedule
+    apply = apply_fn or _default_apply_fn()
 
     games = client.get_games_for_date(target_date)
     start_times: Sequence[datetime] = [

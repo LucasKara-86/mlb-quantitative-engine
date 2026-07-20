@@ -4,7 +4,11 @@ from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 from mlb_quantitative_engine.api.mlb_api import GameSummary
-from mlb_quantitative_engine.reports.daily_planner import plan_today
+from mlb_quantitative_engine.reports.daily_planner import (
+    _cron_line,
+    _replace_block,
+    plan_today,
+)
 
 
 def _t(hour: int, minute: int = 0) -> datetime:
@@ -95,3 +99,31 @@ def test_plan_today_returns_computed_values() -> None:
     )
     assert triggers == [_t(22, 10), _t(22, 25)]
     assert window == (_t(22, 40), _t(22, 40) + timedelta(hours=4))
+
+
+def test_cron_line_uses_day_and_month_as_one_shot_trigger() -> None:
+    trigger = _t(22, 40)
+    line = _cron_line(trigger, "echo oi")
+    minute, hour, day, month, weekday, *command = line.split()
+    local = trigger.astimezone()
+    assert (minute, hour, day, month, weekday) == (
+        str(local.minute), str(local.hour), str(local.day), str(local.month), "*",
+    )
+    assert " ".join(command) == "echo oi"
+
+
+def test_replace_block_inserts_new_block_when_crontab_is_empty() -> None:
+    result = _replace_block("", "# BEGIN x", "# END x", ["1 2 3 4 * echo a"])
+    assert result == "# BEGIN x\n1 2 3 4 * echo a\n# END x\n"
+
+
+def test_replace_block_preserves_unrelated_lines() -> None:
+    existing = "0 9 * * * echo outro-job\n# BEGIN x\nold line\n# END x\n"
+    result = _replace_block(existing, "# BEGIN x", "# END x", ["new line"])
+    assert result == "0 9 * * * echo outro-job\n# BEGIN x\nnew line\n# END x\n"
+
+
+def test_replace_block_with_empty_new_lines_removes_the_block() -> None:
+    existing = "0 9 * * * echo outro-job\n# BEGIN x\nold line\n# END x\n"
+    result = _replace_block(existing, "# BEGIN x", "# END x", [])
+    assert result == "0 9 * * * echo outro-job\n"
