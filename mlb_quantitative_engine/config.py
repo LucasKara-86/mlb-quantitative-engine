@@ -47,6 +47,15 @@ class Settings(BaseSettings):
     min_edge: float = 0.04
     min_confidence: float = 0.70
 
+    # Filtros de envio por qualidade do time (validados empiricamente no histórico de
+    # calibração; afetam SÓ Team Total, nunca Game Total). Motivo: o modelo é
+    # sistematicamente superconfiante nas duas pontas abaixo —
+    #  - Team-Total OVER de time fraco (pct < low): projeta ~58% e acerta ~40%.
+    #  - Team-Total UNDER de time forte (pct >= high): projeta ~53% e acerta ~14%.
+    # O lado oposto de cada time segue liberado (fraco -> só Under; forte -> só Over).
+    low_winpct_over_threshold: float = 0.445   # pct abaixo disto: suprime OVER do time
+    high_winpct_under_threshold: float = 0.555  # pct >= disto: suprime UNDER do time
+
     # Logging
     log_level: str = "INFO"
     log_dir: Path = BASE_DIR / "logs"

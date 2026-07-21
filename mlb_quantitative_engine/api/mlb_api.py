@@ -125,6 +125,24 @@ class MLBApiClient:
             away_team_id=away.get("team", {}).get("id"),
         )
 
+    def get_standings(self, season: int) -> Dict[int, float]:
+        """Retorna {team_id: winning_percentage} da temporada regular, para as duas ligas.
+
+        Usado pelo filtro de envio por qualidade do time (ver services/standings_service.py).
+        """
+        payload = self._get(
+            "standings",
+            params={"leagueId": "103,104", "season": season, "standingsTypes": "regularSeason"},
+        )
+        result: Dict[int, float] = {}
+        for record in payload.get("records", []):
+            for team_record in record.get("teamRecords", []):
+                team_id = team_record.get("team", {}).get("id")
+                win_pct = team_record.get("winningPercentage")
+                if team_id is not None and win_pct is not None:
+                    result[int(team_id)] = float(win_pct)
+        return result
+
     def get_game_feed(self, game_pk: int) -> Dict[str, Any]:
         """Retorna o feed ao vivo completo de um jogo específico (play-by-play, boxscore embutido, clima)."""
         return self._get(f"game/{game_pk}/feed/live", base_url=self.live_base_url)

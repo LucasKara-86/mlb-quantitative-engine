@@ -78,6 +78,11 @@ class _FakeApiClient:
     def get_player_game_log(self, person_id: int, group: str, season: Optional[int] = None) -> List:
         return []
 
+    # Classificação vazia -> StandingsService padrão não bloqueia nenhum mercado,
+    # preservando o comportamento dos testes que não exercitam o filtro por qualidade.
+    def get_standings(self, season: int) -> dict:
+        return {}
+
 
 class _FakeLineupService:
     def __init__(self, home_snapshot: LineupSnapshot, away_snapshot: LineupSnapshot) -> None:
@@ -927,6 +932,107 @@ def test_generate_daily_report_evaluates_team_totals_when_event_id_available(rep
     assert "home_team_total_over" in markets
     assert "away_team_total_over" in markets
     assert row.value_bet_recommendation is not None
+
+
+# --- Filtro de envio por qualidade do time (StandingsService) ---
+
+
+class _FakeStandingsService:
+    """Devolve um mapa fixo {team_id: lado_suprimido} sem tocar na rede."""
+
+    def __init__(self, blocked_sides: dict) -> None:
+        self.blocked_sides = blocked_sides
+
+    def get_blocked_team_market_sides(self, season=None) -> dict:
+        return dict(self.blocked_sides)
+
+
+def _candidate(market: str, prob: float, meets: bool = True):
+    from mlb_quantitative_engine.models.value_bet import ValueBet
+
+    return ValueBet(
+        game_pk=1, home_team="Home Team", away_team="Away Team", market=market,
+        bookmaker="X", price=1.90, point=3.5, projected_probability=prob,
+        implied_probability_raw=0.53, implied_probability_fair=0.50, edge=0.10,
+        expected_value=0.10, kelly_fraction=0.10, kelly_fraction_quarter=0.025,
+        suggested_stake_fraction=0.02, minimum_acceptable_price=1.80,
+        confidence_score=90.0, meets_criteria=meets,
+    )
+
+
+def test_select_bet_skips_blocked_market_and_falls_through_to_next_best() -> None:
+    blocked_best = _candidate("away_team_total_over", 0.70)  # maior prob, mas bloqueada
+    runner_up = _candidate("game_total_over", 0.60)
+    chosen = ReportGenerator._select_bet_to_alert(
+        [blocked_best, runner_up], frozenset({"away_team_total_over"})
+    )
+    assert chosen is runner_up  # cai para a próxima qualificada, não fica sem enviar
+
+
+def test_select_bet_returns_none_when_the_only_qualifier_is_blocked() -> None:
+    only = _candidate("away_team_total_over", 0.70)
+    assert ReportGenerator._select_bet_to_alert([only], frozenset({"away_team_total_over"})) is None
+
+
+def test_select_bet_unaffected_when_blocked_market_is_a_different_side() -> None:
+    # bloquear o OVER do time não impede o UNDER do mesmo time de ser enviado
+    under = _candidate("away_team_total_under", 0.66)
+    assert ReportGenerator._select_bet_to_alert([under], frozenset({"away_team_total_over"})) is under
+
+
+def test_blocked_team_total_markets_maps_team_ids_to_sides(repository: Repository) -> None:
+    generator = ReportGenerator(
+        api_client=_FakeApiClient([]),
+        repository=repository,
+        odds_service=_FakeOddsService(),
+        standings_service=_FakeStandingsService({1001: "over", 1002: "under"}),
+    )
+    # _game_summary(): home_team_id=1001, away_team_id=1002
+    blocked = generator._blocked_team_total_markets(_game_summary())
+    assert blocked == frozenset({"home_team_total_over", "away_team_total_under"})
+
+
+def test_weak_team_over_is_persisted_but_never_sent(repository: Repository) -> None:
+    """Time fraco (classificação abaixo do limiar) tem o Team-Total OVER suprimido no
+    ENVIO, mas a avaliação continua persistida para calibração."""
+    from mlb_quantitative_engine.services.odds_service import (
+        GameOdds, GameTeamTotals, MoneylineQuote, TeamTotalsQuote, TotalsQuote,
+    )
+
+    game_odds = GameOdds(
+        home_team="Home Team", away_team="Away Team", commence_time="2026-07-17T23:05:00Z",
+        totals=[TotalsQuote(point=8.5, bookmaker_count=2, over_price=1.90, over_bookmaker="FanDuel",
+                            under_price=1.90, under_bookmaker="DraftKings")],
+        moneyline=MoneylineQuote(home_price=1.80, home_bookmaker="FanDuel", away_price=2.10, away_bookmaker="DraftKings"),
+        event_id="evt1",
+    )
+    team_totals = GameTeamTotals(
+        home=TeamTotalsQuote(team="Home Team", point=3.5, bookmaker_count=2,
+                              over_price=1.85, over_bookmaker="FanDuel",
+                              under_price=1.95, under_bookmaker="DraftKings"),
+        away=TeamTotalsQuote(team="Away Team", point=3.5, bookmaker_count=2,
+                              over_price=1.90, over_bookmaker="FanDuel",
+                              under_price=1.90, under_bookmaker="DraftKings"),
+    )
+    notifier = _FakeTelegramNotifier()
+    generator = ReportGenerator(
+        api_client=_FakeApiClient([_game_summary()]),
+        repository=repository,
+        lineup_service=_FakeLineupService(_OFFICIAL_HOME_LINEUP, _OFFICIAL_AWAY_LINEUP),
+        offense_service=_QueueOffenseService([_batting_metrics(170.0), _batting_metrics(80.0)]),
+        pitching_service=_QueuePitchingService([_pitching_metrics(6.5), _pitching_metrics(3.5)]),
+        odds_service=_FakeOddsService([game_odds], team_totals_by_event={"evt1": team_totals}),
+        telegram_notifier=notifier,
+        standings_service=_FakeStandingsService({1001: "over"}),  # Home Team fraco -> bloqueia OVER
+    )
+
+    generator.generate_daily_report("2026-07-17")
+
+    # nunca envia o over do time fraco...
+    assert all(bet.market != "home_team_total_over" for bet in notifier.sent_bets)
+    # ...mas a avaliação segue no banco para calibração
+    persisted = {bet.market for bet in repository.list_value_bets()}
+    assert "home_team_total_over" in persisted
 
 
 def test_low_confidence_row_schedules_a_lineup_retry(repository: Repository) -> None:

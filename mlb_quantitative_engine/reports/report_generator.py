@@ -81,6 +81,7 @@ from mlb_quantitative_engine.services.odds_service import GameOdds, OddsService
 from mlb_quantitative_engine.services.offense_service import OffenseService
 from mlb_quantitative_engine.services.park_factor_service import ParkFactorService
 from mlb_quantitative_engine.services.pitching_service import PitchingService
+from mlb_quantitative_engine.services.standings_service import StandingsService
 from mlb_quantitative_engine.services.telegram_notifier import TelegramNotifier
 from mlb_quantitative_engine.services.weather_service import WeatherService
 from mlb_quantitative_engine.utils.logger import log
@@ -172,6 +173,7 @@ class ReportGenerator:
         weather_service: Optional[WeatherService] = None,
         projection_engine: Optional[ProjectionEngine] = None,
         telegram_notifier: Optional[TelegramNotifier] = None,
+        standings_service: Optional[StandingsService] = None,
         season: Optional[int] = None,
     ) -> None:
         self.api_client = api_client or MLBApiClient()
@@ -185,6 +187,7 @@ class ReportGenerator:
         self.weather_service = weather_service or WeatherService()
         self.projection_engine = projection_engine or ProjectionEngine()
         self.telegram_notifier = telegram_notifier  # opt-in: None -> nenhum alerta é enviado
+        self.standings_service = standings_service or StandingsService(self.api_client)
         self.season = season or datetime.now(timezone.utc).year
 
     def generate_daily_report(self, date: Optional[str] = None) -> List[GameReportRow]:
@@ -278,7 +281,10 @@ class ReportGenerator:
             home_team_quote=home_team_quote,
             away_team_quote=away_team_quote,
         )
-        self._persist_and_alert(projection_row.id, candidates, game.game_pk, game.game_datetime)
+        blocked_markets = self._blocked_team_total_markets(game)
+        self._persist_and_alert(
+            projection_row.id, candidates, game.game_pk, game.game_datetime, blocked_markets
+        )
         value_bet_fields = self._best_value_bet_fields(candidates)
 
         return GameReportRow(
@@ -468,9 +474,12 @@ class ReportGenerator:
         return current >= start_time - self.MAX_EARLY_SEND_LEAD
 
     @staticmethod
-    def _select_bet_to_alert(candidates: List[ValueBet]) -> Optional[ValueBet]:
+    def _select_bet_to_alert(
+        candidates: List[ValueBet], blocked_markets: "frozenset[str]" = frozenset()
+    ) -> Optional[ValueBet]:
         """Escolhe UMA aposta por jogo para enviar ao Telegram: entre as que qualificam
-        (`meets_criteria`), a de MAIOR probabilidade projetada.
+        (`meets_criteria`) e não estão bloqueadas por qualidade do time
+        (`blocked_markets`), a de MAIOR probabilidade projetada.
 
         Decisão baseada nos resultados reais acumulados do projeto: enviar todas as
         apostas que qualificam por jogo teve taxa de acerto de 43,6% e ROI negativo,
@@ -479,19 +488,46 @@ class ReportGenerator:
         maior probabilidade absoluta (não pelo maior EV, que privilegia azarões de odd
         alta), foi a única estratégia lucrativa no histórico (55,6% de acerto, ROI
         positivo). Todas as avaliações continuam PERSISTIDAS no banco para calibração —
-        só o ENVIO é restringido."""
-        qualifying = [bet for bet in candidates if bet.meets_criteria]
+        só o ENVIO é restringido.
+
+        `blocked_markets` (ver `_blocked_team_total_markets`) remove pontas de Team Total
+        viciadas por qualidade do time; se a melhor ponta cair aí, a próxima qualificada
+        (ex.: o Game Total, ou o lado oposto do mesmo time) ainda pode ser enviada."""
+        qualifying = [
+            bet for bet in candidates if bet.meets_criteria and bet.market not in blocked_markets
+        ]
         if not qualifying:
             return None
         return max(qualifying, key=lambda bet: bet.projected_probability)
 
+    def _blocked_team_total_markets(self, game: GameSummary) -> "frozenset[str]":
+        """Mercados de Team Total a NÃO enviar neste jogo, por qualidade do time (ver
+        services/standings_service.py): time fraco tem o OVER suprimido, time forte tem
+        o UNDER suprimido. Nunca afeta Game Total. Fail-open: sem classificação, vazio."""
+        blocked_sides = self.standings_service.get_blocked_team_market_sides(season=self.season)
+        blocked: set[str] = set()
+        for team_id, prefix in (
+            (game.home_team_id, "home_team_total"),
+            (game.away_team_id, "away_team_total"),
+        ):
+            side = blocked_sides.get(team_id) if team_id is not None else None
+            if side is not None:
+                blocked.add(f"{prefix}_{side}")
+        return frozenset(blocked)
+
     def _persist_and_alert(
-        self, projection_id: int, candidates: List[ValueBet], game_pk: int, game_datetime: Optional[str]
+        self,
+        projection_id: int,
+        candidates: List[ValueBet],
+        game_pk: int,
+        game_datetime: Optional[str],
+        blocked_markets: "frozenset[str]" = frozenset(),
     ) -> None:
         """Persiste TODAS as avaliações (histórico completo p/ calibração) e envia ao
-        Telegram no máximo UMA — a melhor por jogo (ver `_select_bet_to_alert`)."""
+        Telegram no máximo UMA — a melhor por jogo, respeitando os mercados bloqueados
+        por qualidade do time (ver `_select_bet_to_alert`)."""
         saved_by_bet = {id(bet): self._persist_value_bet(projection_id, bet) for bet in candidates}
-        best = self._select_bet_to_alert(candidates)
+        best = self._select_bet_to_alert(candidates, blocked_markets)
         if best is not None:
             self._maybe_send_telegram_alert(best, saved_by_bet[id(best)].id, game_datetime)
 
@@ -678,7 +714,10 @@ class ReportGenerator:
             home_team_quote=home_team_quote,
             away_team_quote=away_team_quote,
         )
-        self._persist_and_alert(projection_row.id, candidates, game.game_pk, game.game_datetime)
+        blocked_markets = self._blocked_team_total_markets(game)
+        self._persist_and_alert(
+            projection_row.id, candidates, game.game_pk, game.game_datetime, blocked_markets
+        )
         value_bet_fields = self._best_value_bet_fields(candidates)
 
         if confidence_score >= MIN_CONFIDENCE:
