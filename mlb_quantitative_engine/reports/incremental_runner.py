@@ -56,7 +56,10 @@ def run_due_batches(
     Retorna a lista de lotes efetivamente processados nesta chamada (vazia se
     nenhum lote estava com o horário de disparo já alcançado).
     """
-    target_date = date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    # Data LOCAL, não UTC: com UTC, qualquer disparo depois das 21h (horário de
+    # Brasília) já cairia no dia seguinte em UTC e buscaria o schedule errado na
+    # API da MLB, perdendo os lotes pendentes de hoje silenciosamente.
+    target_date = date or datetime.now().strftime("%Y-%m-%d")
     now = now or datetime.now(timezone.utc)
     client = api_client or MLBApiClient()
     repo = repository or Repository()

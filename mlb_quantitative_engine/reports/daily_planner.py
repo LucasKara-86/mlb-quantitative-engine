@@ -239,7 +239,9 @@ def plan_today(
     `apply_fn` é injetável para testes (padrão: reescreve as tarefas reais do SO —
     Windows Task Scheduler ou crontab, conforme a plataforma)."""
     now = now or datetime.now(timezone.utc)
-    target_date = date or now.strftime("%Y-%m-%d")
+    # Data LOCAL, não UTC (ver mesmo cuidado em incremental_runner.py): evita que
+    # uma execução tardia do planner vire o dia errado em UTC.
+    target_date = date or now.astimezone().strftime("%Y-%m-%d")
     client = api_client or MLBApiClient()
     apply = apply_fn or _default_apply_fn()
 
