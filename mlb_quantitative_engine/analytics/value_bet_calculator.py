@@ -67,7 +67,12 @@ projections.py.
 
 from typing import Tuple
 
-from mlb_quantitative_engine.analytics.monte_carlo import simulate_total_probability
+from mlb_quantitative_engine.analytics.monte_carlo import (
+    DEFAULT_MEAN_UNCERTAINTY_PCT,
+    DEFAULT_N_SIMULATIONS,
+    simulate_total_probability,
+)
+from mlb_quantitative_engine.analytics.poisson import DEFAULT_OVERDISPERSION
 from mlb_quantitative_engine.models.value_bet import ValueBet
 
 MIN_EXPECTED_VALUE: float = 0.05
@@ -134,6 +139,9 @@ def _evaluate_side(
     market_prefix: str = "game_total",
     max_stake_fraction: float = MAX_STAKE_FRACTION,
     price_tolerance: float = PRICE_TOLERANCE,
+    min_expected_value: float = MIN_EXPECTED_VALUE,
+    min_edge: float = MIN_EDGE,
+    min_confidence: float = MIN_CONFIDENCE,
 ) -> ValueBet:
     edge = calculate_edge(projected_probability, fair_implied_probability)
     ev = expected_value(projected_probability, price)
@@ -142,7 +150,7 @@ def _evaluate_side(
     suggested_stake = cap_stake_fraction(kelly_quarter, max_stake_fraction)
     min_price = minimum_acceptable_price(price, price_tolerance)
 
-    meets_criteria = ev > MIN_EXPECTED_VALUE and edge > MIN_EDGE and confidence_score > MIN_CONFIDENCE
+    meets_criteria = ev > min_expected_value and edge > min_edge and confidence_score > min_confidence
 
     return ValueBet(
         game_pk=game_pk,
@@ -181,33 +189,48 @@ def evaluate_game_total_value_bets(
     market_prefix: str = "game_total",
     max_stake_fraction: float = MAX_STAKE_FRACTION,
     price_tolerance: float = PRICE_TOLERANCE,
+    min_expected_value: float = MIN_EXPECTED_VALUE,
+    min_edge: float = MIN_EDGE,
+    min_confidence: float = MIN_CONFIDENCE,
+    mean_uncertainty_pct: float = DEFAULT_MEAN_UNCERTAINTY_PCT,
+    overdispersion: float = DEFAULT_OVERDISPERSION,
+    n_simulations: int = DEFAULT_N_SIMULATIONS,
 ) -> Tuple[ValueBet, ValueBet]:
     """Avalia as duas pontas (Over e Under) de um mercado de total para um jogo.
 
     `projected_total_runs` é a média projetada pelo motor (analytics/projections.py) —
     pode ser o total do jogo inteiro ou o total projetado de UM time específico
     (ver evaluate_team_total_value_bets); a probabilidade em cada ponta é derivada
-    via Poisson na MESMA linha (`point`) que o mercado está oferecendo, para uma
-    comparação justa. `market_prefix` rotula o mercado resultante (ex.:
-    "game_total", "home_team_total", "away_team_total").
+    via Monte Carlo (analytics/monte_carlo.py) na MESMA linha (`point`) que o mercado
+    está oferecendo, para uma comparação justa. `market_prefix` rotula o mercado
+    resultante (ex.: "game_total", "home_team_total", "away_team_total").
+
+    Todos os limiares/parâmetros de cálculo têm defaults de módulo (os valores de
+    especificação/literatura), mas quem orquestra a avaliação em produção
+    (reports/report_generator.py) deve passá-los explicitamente a partir de
+    `config.settings` -- este módulo permanece puramente matemático, sem importar
+    `config` diretamente (mesma convenção do restante de analytics/).
     """
     fair_over, fair_under = remove_vig(over_price, under_price)
     raw_over = 1.0 / over_price if over_price > 0 else 0.0
     raw_under = 1.0 / under_price if under_price > 0 else 0.0
 
-    simulation = simulate_total_probability(projected_total_runs, point)
+    simulation = simulate_total_probability(
+        projected_total_runs, point,
+        mean_uncertainty_pct=mean_uncertainty_pct, overdispersion=overdispersion, n_simulations=n_simulations,
+    )
     projected_prob_over = simulation.probability_over
     projected_prob_under = simulation.probability_under
 
     over_bet = _evaluate_side(
         game_pk, home_team, away_team, "over", over_bookmaker, over_price, point,
         projected_prob_over, raw_over, fair_over, confidence_score, kelly_fraction_multiplier, market_prefix,
-        max_stake_fraction, price_tolerance,
+        max_stake_fraction, price_tolerance, min_expected_value, min_edge, min_confidence,
     )
     under_bet = _evaluate_side(
         game_pk, home_team, away_team, "under", under_bookmaker, under_price, point,
         projected_prob_under, raw_under, fair_under, confidence_score, kelly_fraction_multiplier, market_prefix,
-        max_stake_fraction, price_tolerance,
+        max_stake_fraction, price_tolerance, min_expected_value, min_edge, min_confidence,
     )
     return over_bet, under_bet
 
@@ -227,6 +250,12 @@ def evaluate_team_total_value_bets(
     kelly_fraction_multiplier: float = DEFAULT_KELLY_FRACTION_MULTIPLIER,
     max_stake_fraction: float = MAX_STAKE_FRACTION,
     price_tolerance: float = PRICE_TOLERANCE,
+    min_expected_value: float = MIN_EXPECTED_VALUE,
+    min_edge: float = MIN_EDGE,
+    min_confidence: float = MIN_CONFIDENCE,
+    mean_uncertainty_pct: float = DEFAULT_MEAN_UNCERTAINTY_PCT,
+    overdispersion: float = DEFAULT_OVERDISPERSION,
+    n_simulations: int = DEFAULT_N_SIMULATIONS,
 ) -> Tuple[ValueBet, ValueBet]:
     """Avalia as duas pontas (Over/Under) do mercado de Team Total para UM time específico.
 
@@ -248,4 +277,10 @@ def evaluate_team_total_value_bets(
         market_prefix=team_label,
         max_stake_fraction=max_stake_fraction,
         price_tolerance=price_tolerance,
+        min_expected_value=min_expected_value,
+        min_edge=min_edge,
+        min_confidence=min_confidence,
+        mean_uncertainty_pct=mean_uncertainty_pct,
+        overdispersion=overdispersion,
+        n_simulations=n_simulations,
     )

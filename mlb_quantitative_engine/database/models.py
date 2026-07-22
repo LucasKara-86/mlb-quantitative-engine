@@ -101,6 +101,25 @@ class ProcessedBatch(Base):
     processed_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
 
+class ParameterChangeLog(Base):
+    """Histórico de cada ajuste de parâmetro tentado por services/auto_tuning_service.py --
+    aplicado (passou no gate de testes e foi commitado) ou revertido (falhou o gate). É o
+    que dá o "cooldown" (não reajustar o mesmo parâmetro cedo demais) e o que aparece na
+    seção "mudanças recentes em observação" do relatório diário do Telegram."""
+
+    __tablename__ = "parameter_change_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    parameter_name: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    old_value: Mapped[float] = mapped_column(Float, nullable=False)
+    new_value: Mapped[float] = mapped_column(Float, nullable=False)
+    rationale: Mapped[str] = mapped_column(String, nullable=False)
+    sample_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    applied: Mapped[bool] = mapped_column(Boolean, nullable=False)  # False = tentado, revertido (testes falharam)
+    git_commit_sha: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
+
+
 class PendingLineupRetry(Base):
     """Um jogo processado com lineup ainda não oficial (confiança baixa) — agenda uma
     nova tentativa que rebusca só a lineup (gratuita) e recalcula com as odds já

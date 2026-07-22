@@ -13,13 +13,17 @@ propositais: a recomendação deve valer em qualquer casa que ofereça pelo
 menos essa odd, não travada a uma única banca específica.
 """
 
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Sequence
 from zoneinfo import ZoneInfo
 
+from mlb_quantitative_engine.analytics.backtesting import BacktestResult
 from mlb_quantitative_engine.api.telegram_api import TelegramApiClient
 from mlb_quantitative_engine.config import settings
 from mlb_quantitative_engine.models.value_bet import ValueBet, describe_market
+from mlb_quantitative_engine.services.auto_tuning_service import AutoTuningRunResult
+from mlb_quantitative_engine.services.calibration_report_service import CalibrationReport
 from mlb_quantitative_engine.utils.logger import log
 
 _BRASILIA_TZ = ZoneInfo("America/Sao_Paulo")
@@ -87,6 +91,103 @@ def format_bet_result_message(
     )
 
 
+@dataclass(frozen=True)
+class RecentChangeSummary:
+    """Uma mudança de parâmetro aplicada nos últimos dias, com o efeito observado desde
+    então (hit rate geral do período, não causal por parâmetro -- só um sinal de
+    acompanhamento) -- monta a seção "mudanças recentes em observação" do relatório."""
+
+    parameter_name: str
+    old_value: float
+    new_value: float
+    days_ago: int
+    bets_since: int
+    hit_rate_since: Optional[float]
+
+
+def _format_reliability_highlight(reliability) -> Optional[str]:
+    if not reliability:
+        return None
+    worst = max(reliability, key=lambda bucket: abs(bucket.overconfidence))
+    if abs(worst.overconfidence) < 0.05:
+        return None
+    return (
+        f"faixa {worst.bucket_label} -- previsto {worst.predicted_probability_mean:.1%}, "
+        f"real {worst.actual_win_rate:.1%} (n={worst.count}, overconf. {worst.overconfidence:+.1%})"
+    )
+
+
+def format_daily_analysis_message(
+    date: str,
+    yesterday_backtest: BacktestResult,
+    calibration: CalibrationReport,
+    auto_tuning: AutoTuningRunResult,
+    recent_changes: Sequence[RecentChangeSummary] = (),
+) -> str:
+    """Formata o relatório diário de análise + auto-tuning (ver reports/daily_analysis_runner.py)."""
+    lines = [f"📊 <b>Análise diária -- {date}</b>", "", "<b>Resultado de ontem</b>"]
+
+    if yesterday_backtest.total_bets == 0:
+        lines.append("Nenhuma aposta resolvida ontem.")
+    else:
+        lines.append(
+            f"{yesterday_backtest.total_bets} apostas (✅{yesterday_backtest.wins} "
+            f"❌{yesterday_backtest.losses} ⚪{yesterday_backtest.pushes}) | "
+            f"Hit rate: {yesterday_backtest.hit_rate:.1%} | ROI: {yesterday_backtest.roi:+.1%}"
+        )
+
+    lines.extend(["", "<b>Calibração acumulada</b>"])
+    if calibration.total_resolved == 0:
+        lines.append("Sem histórico suficiente ainda.")
+    else:
+        lines.append(
+            f"{calibration.total_resolved} apostas resolvidas no total | "
+            f"Hit rate: {calibration.overall_hit_rate:.1%} | Brier: {calibration.brier_score:.4f}"
+        )
+        highlight = _format_reliability_highlight(calibration.reliability)
+        if highlight:
+            lines.append(f"⚠️ Pior faixa: {highlight}")
+
+    lines.extend(["", "<b>Mudanças hoje</b>"])
+    if auto_tuning.skipped_reason:
+        lines.append(f"⏸️ Nada aplicado: {auto_tuning.skipped_reason}")
+    elif not auto_tuning.changes:
+        lines.append("Nenhuma mudança -- amostra insuficiente ou tudo dentro do esperado.")
+    else:
+        for change in auto_tuning.changes:
+            adjustment = change.adjustment
+            if change.applied:
+                lines.append(
+                    f"✅ <b>{adjustment.parameter_name}</b>: {adjustment.old_value} → {adjustment.new_value}\n"
+                    f"   {adjustment.rationale}"
+                )
+            else:
+                lines.append(
+                    f"❌ <b>{adjustment.parameter_name}</b>: tentativa revertida ({change.test_failure_summary})"
+                )
+
+    if auto_tuning.deferred:
+        lines.extend(["", "<b>Candidatas represadas</b> (cooldown ou teto do dia)"])
+        for candidate in auto_tuning.deferred:
+            lines.append(f"• {candidate.parameter_name}: {candidate.old_value} → {candidate.new_value}")
+
+    if auto_tuning.negative_roi_findings:
+        lines.extend(["", "<b>Achados</b> (sem ação automática)"])
+        for finding in auto_tuning.negative_roi_findings:
+            lines.append(f"• {finding}")
+
+    if recent_changes:
+        lines.extend(["", "<b>Mudanças recentes em observação</b>"])
+        for recent in recent_changes:
+            hit_rate_text = f"{recent.hit_rate_since:.1%}" if recent.hit_rate_since is not None else "N/D"
+            lines.append(
+                f"• {recent.parameter_name} ({recent.old_value}→{recent.new_value}, há {recent.days_ago}d): "
+                f"{recent.bets_since} apostas desde então, hit rate {hit_rate_text}"
+            )
+
+    return "\n".join(lines)
+
+
 class TelegramNotifier:
     """Envia alertas de Value Bet para um canal do Telegram."""
 
@@ -124,4 +225,21 @@ class TelegramNotifier:
 
         message = format_bet_result_message(market, home_team, away_team, point, outcome_label, home_runs, away_runs)
         log.info(f"Enviando resultado ({outcome_label}) ao Telegram: {away_team} @ {home_team} ({market})")
+        return self.api_client.send_message(self.channel_id, message)
+
+    def send_daily_analysis_report(
+        self,
+        date: str,
+        yesterday_backtest: BacktestResult,
+        calibration: CalibrationReport,
+        auto_tuning: AutoTuningRunResult,
+        recent_changes: Sequence[RecentChangeSummary] = (),
+    ) -> dict:
+        """Formata e envia o relatório diário de análise + auto-tuning (ver
+        reports/daily_analysis_runner.py)."""
+        if not self.channel_id:
+            raise ValueError("Nenhum canal configurado (TELEGRAM_CHANNEL_ID ausente)")
+
+        message = format_daily_analysis_message(date, yesterday_backtest, calibration, auto_tuning, recent_changes)
+        log.info(f"Enviando relatório diário de análise ao Telegram ({date})")
         return self.api_client.send_message(self.channel_id, message)

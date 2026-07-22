@@ -106,8 +106,31 @@ class ProjectionEngine:
     PA_STABILIZATION_POINT: float = 250.0
     IP_STABILIZATION_POINT: float = 70.0
 
-    def __init__(self, constants: LeagueConstants = LeagueConstants()) -> None:
+    def __init__(
+        self,
+        constants: LeagueConstants = LeagueConstants(),
+        starter_expected_innings: Optional[float] = None,
+        bullpen_fatigue_impact: Optional[float] = None,
+        bullpen_unavailable_impact: Optional[float] = None,
+        pa_stabilization_point: Optional[float] = None,
+        ip_stabilization_point: Optional[float] = None,
+    ) -> None:
         self.constants = constants
+        # Overrides opcionais das constantes de classe acima (mesmos nomes, sombreando só
+        # nesta instância) -- permite a orquestração (report_generator.py) injetar os
+        # valores de config.settings sem duplicar a lógica interna, que já referencia
+        # self.STARTER_EXPECTED_INNINGS etc. Acesso via classe (ProjectionEngine.X)
+        # continua devolvendo o default de literatura, inalterado.
+        if starter_expected_innings is not None:
+            self.STARTER_EXPECTED_INNINGS = starter_expected_innings
+        if bullpen_fatigue_impact is not None:
+            self.BULLPEN_FATIGUE_IMPACT = bullpen_fatigue_impact
+        if bullpen_unavailable_impact is not None:
+            self.BULLPEN_UNAVAILABLE_IMPACT = bullpen_unavailable_impact
+        if pa_stabilization_point is not None:
+            self.PA_STABILIZATION_POINT = pa_stabilization_point
+        if ip_stabilization_point is not None:
+            self.IP_STABILIZATION_POINT = ip_stabilization_point
 
     def _shrunk_wrc_plus(self, offense: TeamOffenseInput) -> float:
         if offense.plate_appearances is None:

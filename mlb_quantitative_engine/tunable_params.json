@@ -1,0 +1,21 @@
+{
+  "_comment": "Parâmetros numéricos ajustáveis do motor de cálculo. Editado manualmente ou por services/auto_tuning_service.py (nunca lógica/fórmulas, só estes valores). Cada mudança autônoma vira um commit git dedicado neste arquivo -- ver ParameterChangeLog no banco para o histórico com motivo/amostra.",
+  "model_version": "v1",
+  "last_updated": "2026-07-22",
+  "min_expected_value": 0.05,
+  "min_edge": 0.04,
+  "min_confidence": 70.0,
+  "low_winpct_over_threshold": 0.445,
+  "high_winpct_under_threshold": 0.555,
+  "kelly_fraction_multiplier": 0.25,
+  "max_stake_fraction": 0.02,
+  "price_tolerance": 0.05,
+  "overdispersion": 1.4,
+  "mean_uncertainty_pct": 0.12,
+  "monte_carlo_simulations": 20000,
+  "starter_expected_innings": 5.33,
+  "bullpen_fatigue_impact": 0.15,
+  "bullpen_unavailable_impact": 0.03,
+  "pa_stabilization_point": 250.0,
+  "ip_stabilization_point": 70.0
+}

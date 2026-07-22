@@ -12,6 +12,7 @@ from mlb_quantitative_engine.config import settings
 from mlb_quantitative_engine.database.models import (
     Base,
     Game,
+    ParameterChangeLog,
     PendingLineupRetry,
     ProcessedBatch,
     Projection,
@@ -224,6 +225,84 @@ class Repository:
         dados usada pelo harness de calibração."""
         with self.session() as session:
             return session.query(ValueBet).filter(ValueBet.outcome.isnot(None)).all()
+
+    def list_resolved_value_bets_with_game(self) -> Sequence[Tuple[ValueBet, Game]]:
+        """Como `list_resolved_value_bets`, mas trazendo o `Game` junto (game_pk, game_date)
+        num único JOIN -- usado por services/backtest_report_service.py, que precisa desses
+        campos para montar `analytics.backtesting.SettledBet`."""
+        with self.session() as session:
+            return (
+                session.query(ValueBet, Game)
+                .join(Projection, ValueBet.projection_id == Projection.id)
+                .join(Game, Projection.game_id == Game.id)
+                .filter(ValueBet.outcome.isnot(None))
+                .all()
+            )
+
+    def list_resolved_value_bets_for_date(self, game_date: str) -> Sequence[ValueBet]:
+        """Apostas resolvidas (outcome preenchido) cujo jogo é de uma data específica
+        (`Game.game_date`, ex.: "2026-07-21") — o recorte "resultados de ontem" usado por
+        reports/daily_analysis_runner.py, em vez do acumulado histórico completo."""
+        with self.session() as session:
+            return (
+                session.query(ValueBet)
+                .join(Projection, ValueBet.projection_id == Projection.id)
+                .join(Game, Projection.game_id == Game.id)
+                .filter(Game.game_date == game_date, ValueBet.outcome.isnot(None))
+                .all()
+            )
+
+    # --- Histórico de ajustes de parâmetro (auto-tuning) ---
+
+    def record_parameter_change(
+        self,
+        parameter_name: str,
+        old_value: float,
+        new_value: float,
+        rationale: str,
+        sample_size: int,
+        applied: bool,
+        git_commit_sha: Optional[str] = None,
+    ) -> ParameterChangeLog:
+        """Registra uma tentativa de ajuste de parâmetro (services/auto_tuning_service.py)
+        -- `applied=True` quando passou no gate de testes e foi commitado, `False` quando
+        os testes falharam e o valor anterior foi restaurado."""
+        with self.session() as session:
+            entry = ParameterChangeLog(
+                parameter_name=parameter_name,
+                old_value=old_value,
+                new_value=new_value,
+                rationale=rationale,
+                sample_size=sample_size,
+                applied=applied,
+                git_commit_sha=git_commit_sha,
+            )
+            session.add(entry)
+            session.flush()
+            session.refresh(entry)
+            return entry
+
+    def last_applied_parameter_change(self, parameter_name: str) -> Optional[ParameterChangeLog]:
+        """Mudança aplicada com sucesso mais recente para um parâmetro específico — usado
+        para o cooldown (não reajustar o mesmo parâmetro cedo demais, ver analytics/auto_tuning.py)."""
+        with self.session() as session:
+            return (
+                session.query(ParameterChangeLog)
+                .filter_by(parameter_name=parameter_name, applied=True)
+                .order_by(ParameterChangeLog.created_at.desc())
+                .first()
+            )
+
+    def list_recent_parameter_changes(self, since: datetime) -> Sequence[ParameterChangeLog]:
+        """Todas as tentativas de ajuste (aplicadas ou revertidas) desde `since` — alimenta
+        a seção "mudanças recentes em observação" do relatório diário do Telegram."""
+        with self.session() as session:
+            return (
+                session.query(ParameterChangeLog)
+                .filter(ParameterChangeLog.created_at >= since)
+                .order_by(ParameterChangeLog.created_at.desc())
+                .all()
+            )
 
     def has_alert_been_sent(self, game_pk: int, market: str) -> bool:
         """Diz se já existe um ValueBet com `alert_sent=True` para esse jogo+mercado,

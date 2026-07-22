@@ -62,16 +62,16 @@ from typing import Any, List, Optional, Sequence, Tuple
 
 import pandas as pd
 
-from mlb_quantitative_engine.analytics.monte_carlo import simulate_total_probability
+from mlb_quantitative_engine.analytics.monte_carlo import MonteCarloResult, simulate_total_probability
 from mlb_quantitative_engine.analytics.projections import OpposingPitcherInput, ProjectionEngine, TeamOffenseInput
 from mlb_quantitative_engine.analytics.sabermetrics import BattingMetrics
 from mlb_quantitative_engine.analytics.value_bet_calculator import (
-    MIN_CONFIDENCE,
     evaluate_game_total_value_bets,
     evaluate_team_total_value_bets,
 )
 from mlb_quantitative_engine.api.mlb_api import GameSummary, MLBApiClient
 from mlb_quantitative_engine.api.odds_api import OddsApiError
+from mlb_quantitative_engine.config import settings
 from mlb_quantitative_engine.database.repository import Repository
 from mlb_quantitative_engine.models.game_projection import GameProjection
 from mlb_quantitative_engine.models.value_bet import ValueBet
@@ -185,7 +185,13 @@ class ReportGenerator:
         self.bullpen_service = bullpen_service or BullpenService(self.api_client)
         self.odds_service = odds_service or OddsService()
         self.weather_service = weather_service or WeatherService()
-        self.projection_engine = projection_engine or ProjectionEngine()
+        self.projection_engine = projection_engine or ProjectionEngine(
+            starter_expected_innings=settings.starter_expected_innings,
+            bullpen_fatigue_impact=settings.bullpen_fatigue_impact,
+            bullpen_unavailable_impact=settings.bullpen_unavailable_impact,
+            pa_stabilization_point=settings.pa_stabilization_point,
+            ip_stabilization_point=settings.ip_stabilization_point,
+        )
         self.telegram_notifier = telegram_notifier  # opt-in: None -> nenhum alerta é enviado
         self.standings_service = standings_service or StandingsService(self.api_client)
         self.season = season or datetime.now(timezone.utc).year
@@ -255,7 +261,7 @@ class ReportGenerator:
                 away_team_quote = _QuoteInputs.from_quote(team_totals.away)
 
         total_line = game_quote.point if game_quote is not None else self.DEFAULT_TOTAL_LINE
-        total_simulation = simulate_total_probability(projection.projected_total_runs, total_line)
+        total_simulation = self._simulate(projection.projected_total_runs, total_line)
         prob_over = total_simulation.probability_over
         prob_under = total_simulation.probability_under
 
@@ -296,6 +302,19 @@ class ReportGenerator:
             projected_probability_under=round(prob_under, 4),
             confidence_score=round(confidence_score, 1),
             **value_bet_fields,
+        )
+
+    @staticmethod
+    def _simulate(projected_total_runs: float, total_line: float) -> MonteCarloResult:
+        """Wrapper fino sobre `simulate_total_probability` que injeta os parâmetros de
+        `config.settings` (overdispersão, incerteza da média, nº de simulações) -- únicos
+        parâmetros que `services/auto_tuning_service.py` pode ajustar nesta camada."""
+        return simulate_total_probability(
+            projected_total_runs,
+            total_line,
+            mean_uncertainty_pct=settings.mean_uncertainty_pct,
+            overdispersion=settings.overdispersion,
+            n_simulations=settings.monte_carlo_simulations,
         )
 
     def _project(self, game: GameSummary) -> Tuple[GameProjection, float]:
@@ -341,15 +360,15 @@ class ReportGenerator:
 
     def _schedule_or_resolve_lineup_retry(self, game: GameSummary, confidence_score: float) -> None:
         """Se a confiança da lineup ainda está abaixo do limiar de Value Bet
-        (`MIN_CONFIDENCE`), agenda uma retentativa gratuita (só lineup) daqui a 30
+        (`settings.min_confidence`), agenda uma retentativa gratuita (só lineup) daqui a 30
         minutos; caso contrário, resolve qualquer retentativa pendente para o jogo —
         a lineup já está confiável o bastante e não precisa mais ser reconsultada."""
-        if confidence_score < MIN_CONFIDENCE:
+        if confidence_score < settings.min_confidence:
             retry_at = datetime.now(timezone.utc) + RETRY_DELAY
             self.repository.upsert_pending_lineup_retry(game.game_pk, game.game_date, retry_at=retry_at)
             log.info(
                 f"Jogo {game.game_pk}: confiança {confidence_score:.1f} abaixo do limiar "
-                f"({MIN_CONFIDENCE}); retentativa de lineup agendada para {retry_at.isoformat()}"
+                f"({settings.min_confidence}); retentativa de lineup agendada para {retry_at.isoformat()}"
             )
         else:
             self.repository.mark_lineup_retry_resolved(game.game_pk)
@@ -372,6 +391,21 @@ class ReportGenerator:
         normal (cotações recém-buscadas) quanto pela retentativa de lineup (cotações
         reconstruídas dos ValueBets já persistidos, sem gastar créditos novos)."""
         candidates: List[ValueBet] = []
+        # Parâmetros ajustáveis de config.settings, threadados explicitamente aqui para que
+        # analytics/value_bet_calculator.py permaneça puramente matemático (sem importar
+        # config) -- ver docstring de evaluate_game_total_value_bets. É o único ponto do
+        # pipeline que traduz settings -> avaliação de Value Bet.
+        tunable_kwargs = dict(
+            kelly_fraction_multiplier=settings.kelly_fraction_multiplier,
+            max_stake_fraction=settings.max_stake_fraction,
+            price_tolerance=settings.price_tolerance,
+            min_expected_value=settings.min_expected_value,
+            min_edge=settings.min_edge,
+            min_confidence=settings.min_confidence,
+            mean_uncertainty_pct=settings.mean_uncertainty_pct,
+            overdispersion=settings.overdispersion,
+            n_simulations=settings.monte_carlo_simulations,
+        )
 
         if game_quote is not None:
             game_over, game_under = evaluate_game_total_value_bets(
@@ -379,7 +413,7 @@ class ReportGenerator:
                 projected_total_runs=projected_total_runs, point=game_quote.point,
                 over_price=game_quote.over_price, over_bookmaker=game_quote.over_bookmaker,
                 under_price=game_quote.under_price, under_bookmaker=game_quote.under_bookmaker,
-                confidence_score=confidence_score,
+                confidence_score=confidence_score, **tunable_kwargs,
             )
             candidates.extend([game_over, game_under])
 
@@ -390,6 +424,7 @@ class ReportGenerator:
                 point=home_team_quote.point, over_price=home_team_quote.over_price,
                 over_bookmaker=home_team_quote.over_bookmaker, under_price=home_team_quote.under_price,
                 under_bookmaker=home_team_quote.under_bookmaker, confidence_score=confidence_score,
+                **tunable_kwargs,
             )
             candidates.extend([home_over, home_under])
 
@@ -400,6 +435,7 @@ class ReportGenerator:
                 point=away_team_quote.point, over_price=away_team_quote.over_price,
                 over_bookmaker=away_team_quote.over_bookmaker, under_price=away_team_quote.under_price,
                 under_bookmaker=away_team_quote.under_bookmaker, confidence_score=confidence_score,
+                **tunable_kwargs,
             )
             candidates.extend([away_over, away_under])
 
@@ -688,7 +724,7 @@ class ReportGenerator:
         away_team_quote = self._quote_from_cached_bets(cached_bets, "away_team_total")
 
         total_line = game_quote.point if game_quote is not None else self.DEFAULT_TOTAL_LINE
-        total_simulation = simulate_total_probability(projection.projected_total_runs, total_line)
+        total_simulation = self._simulate(projection.projected_total_runs, total_line)
         prob_over = total_simulation.probability_over
         prob_under = total_simulation.probability_under
 
@@ -720,7 +756,7 @@ class ReportGenerator:
         )
         value_bet_fields = self._best_value_bet_fields(candidates)
 
-        if confidence_score >= MIN_CONFIDENCE:
+        if confidence_score >= settings.min_confidence:
             self.repository.mark_lineup_retry_resolved(game_pk)
         else:
             self.repository.upsert_pending_lineup_retry(game_pk, game_row.game_date, retry_at=now + RETRY_DELAY)
