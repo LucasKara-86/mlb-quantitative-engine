@@ -29,6 +29,7 @@ no `tunable_params.json` real durante a suíte.
 
 import json
 import subprocess
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -108,7 +109,7 @@ def _default_git_is_clean() -> bool:
 
 
 def _default_run_tests() -> bool:
-    result = subprocess.run(["python", "-m", "pytest", "-q"], cwd=_PROJECT_ROOT, capture_output=True, text=True)
+    result = subprocess.run([sys.executable, "-m", "pytest", "-q"], cwd=_PROJECT_ROOT, capture_output=True, text=True)
     if result.returncode != 0:
         log.warning(f"auto_tuning_service: gate de testes falhou:\n{result.stdout[-4000:]}\n{result.stderr[-1000:]}")
     return result.returncode == 0
