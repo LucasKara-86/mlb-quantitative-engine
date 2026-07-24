@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
-from mlb_quantitative_engine.config import Settings, get_settings, settings
+from mlb_quantitative_engine.config import Settings, TUNABLE_PARAMS_PATH, get_settings, settings
 
 
 def test_settings_singleton_is_cached() -> None:
@@ -32,15 +33,29 @@ def test_value_bet_thresholds_match_specification() -> None:
 
 
 def test_tunable_params_loaded_from_json() -> None:
-    """Parâmetros ajustáveis pelo auto-tuning vêm de tunable_params.json, não hardcoded."""
-    assert settings.overdispersion == 1.4
-    assert settings.mean_uncertainty_pct == 0.12
-    assert settings.kelly_fraction_multiplier == 0.25
-    assert settings.max_stake_fraction == 0.02
-    assert settings.price_tolerance == 0.05
-    assert settings.starter_expected_innings == 5.33
-    assert settings.low_winpct_over_threshold == 0.445
-    assert settings.high_winpct_under_threshold == 0.555
+    """Parâmetros ajustáveis vêm de tunable_params.json, não hardcoded -- valida que
+    `settings` reflete o CONTEÚDO ATUAL do arquivo. Não fixa valores literais de propósito:
+    `overdispersion`/`mean_uncertainty_pct` (e outros) são reescritos pelo auto-tuning
+    (services/auto_tuning_service.py), então pinar um valor exato aqui faria o gate de
+    testes rejeitar todo ajuste desses parâmetros -- justamente o que este teste deveria
+    proteger. Compara-se contra o JSON, que é a fonte da verdade."""
+    on_disk = json.loads(TUNABLE_PARAMS_PATH.read_text(encoding="utf-8"))
+    tunable_attributes = (
+        "overdispersion",
+        "mean_uncertainty_pct",
+        "kelly_fraction_multiplier",
+        "max_stake_fraction",
+        "price_tolerance",
+        "starter_expected_innings",
+        "low_winpct_over_threshold",
+        "high_winpct_under_threshold",
+    )
+    for name in tunable_attributes:
+        assert name in on_disk, f"{name} ausente em tunable_params.json"
+        assert getattr(settings, name) == on_disk[name], (
+            f"settings.{name}={getattr(settings, name)!r} não reflete "
+            f"tunable_params.json[{name!r}]={on_disk[name]!r}"
+        )
 
 
 def test_env_var_override(monkeypatch, tmp_path: Path) -> None:
